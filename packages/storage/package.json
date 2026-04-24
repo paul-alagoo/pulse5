@@ -1,0 +1,14 @@
+{
+  "name": "@pulse5/storage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "migrate:up": "echo \"migrations land in Phase 1\" && exit 0"
+  }
+}

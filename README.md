@@ -112,8 +112,8 @@ Everything else in [PULSE5_START.md](PULSE5_START.md) (schema, strategy rules, r
 | Polymarket RTDS | `@polymarket/real-time-data-client` |
 | Wallet lib (peer of clob-client-v2) | `viem` |
 | DB | PostgreSQL 16 via Docker Compose |
-| DB client | `postgres` (porsager) or `pg` — pick in Phase 0 |
-| Migrations | `node-pg-migrate` or plain SQL files (pick in Phase 0) |
+| DB client | `pg` (node-postgres) |
+| Migrations | `node-pg-migrate` (transactional, up/down, tracking table) |
 | Validation | `zod` |
 | Logging | `pino` |
 | Tests | `vitest` + a marked live-smoke suite |
@@ -177,7 +177,7 @@ All phases use TDD: write unit tests first, make them pass, refactor. Target 80%
 - [ ] `docker-compose.yml` with Postgres 16 + persistent volume.
 - [ ] `.env.example` listing every variable from §9.
 - [ ] Root scripts: `dev:collector`, `db:up`, `db:migrate`, `db:reset`, `test`, `test:smoke`, `typecheck`, `lint`.
-- [ ] Decision log entry: pick `pg` vs `postgres`, and migration tool.
+- [x] Decision log entry: **`pg` (node-postgres) + `node-pg-migrate`** — recorded in §5.
 - [ ] **Acceptance:** `pnpm install && pnpm typecheck && pnpm lint` all green on empty skeleton.
 
 ### Phase 1 — Database migrations

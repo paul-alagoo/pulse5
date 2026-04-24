@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pulse5-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pulse5
+      POSTGRES_PASSWORD: pulse5
+      POSTGRES_DB: pulse5
+    ports:
+      - '5432:5432'
+    volumes:
+      - pulse5-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U pulse5']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pulse5-pgdata:
