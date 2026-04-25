@@ -128,15 +128,14 @@ function fmtSummary(s) {
  * @returns {{ ok: true } | { ok: false, code: string, exitCode: number, message: string }}
  */
 export function preflight({ envFileContent, processEnv }) {
+  // The shell-vs-.env conflict + port-pairing checks only matter when the
+  // operator is using `.env` for configuration. The JSON-fallback path
+  // (`C:\\postgres.json` / `PULSE5_PG_CONFIG_PATH`) is validated by
+  // `run-migrate.mjs` instead — this script intentionally degrades to a
+  // no-op in that case so migrations work on a machine that never created
+  // `.env`.
   if (envFileContent == null) {
-    return {
-      ok: false,
-      code: 'env-file-missing',
-      exitCode: 10,
-      message:
-        'Root `.env` not found. Copy `.env.example` to `.env` and edit it ' +
-        'before running db:* commands.',
-    };
+    return { ok: true };
   }
 
   const fileEnv = parseEnvFile(envFileContent);
@@ -145,15 +144,10 @@ export function preflight({ envFileContent, processEnv }) {
   const shellUrl = processEnv.DATABASE_URL;
   const allowExternal = processEnv.PULSE5_ALLOW_EXTERNAL_DATABASE_URL === '1';
 
+  // No DATABASE_URL in `.env` — fine, run-migrate.mjs will source it from
+  // shell env or the JSON fallback. Skip the conflict / port checks.
   if (!fileUrl) {
-    return {
-      ok: false,
-      code: 'env-file-missing-database-url',
-      exitCode: 11,
-      message:
-        'Root `.env` is missing DATABASE_URL. Set it (see `.env.example`) ' +
-        'before running db:* commands.',
-    };
+    return { ok: true };
   }
 
   if (shellUrl && shellUrl !== fileUrl && !allowExternal) {

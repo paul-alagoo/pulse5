@@ -20,8 +20,12 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@nevuamarkets/poly-websockets": "^1.0.2",
+    "@pulse5/models": "workspace:^",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
     "@polymarket/clob-client-v2": "^1.0.2",
+    "@types/ws": "^8.5.13",
     "viem": "^2.48.4"
   }
 }

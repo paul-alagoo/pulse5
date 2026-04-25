@@ -179,23 +179,20 @@ describe('preflight()', () => {
     });
   });
 
-  it('fails when root .env is missing', () => {
+  it('passes when root .env is missing — JSON fallback covers connection resolution', () => {
+    // The JSON fallback (`C:\\postgres.json` / PULSE5_PG_CONFIG_PATH) is
+    // validated by run-migrate.mjs. Preflight intentionally degrades to a
+    // no-op when there is no `.env` to consistency-check.
     const r = preflight({ envFileContent: null, processEnv: {} });
-    expect(r.ok).toBe(false);
-    if (r.ok) return;
-    expect(r.code).toBe('env-file-missing');
-    expect(r.exitCode).toBe(10);
+    expect(r).toEqual({ ok: true });
   });
 
-  it('fails when root .env has no DATABASE_URL', () => {
+  it('passes when root .env has no DATABASE_URL — JSON fallback / shell env will provide it', () => {
     const r = preflight({
       envFileContent: 'PULSE5_PG_HOST_PORT=5433\n',
       processEnv: {},
     });
-    expect(r.ok).toBe(false);
-    if (r.ok) return;
-    expect(r.code).toBe('env-file-missing-database-url');
-    expect(r.exitCode).toBe(11);
+    expect(r).toEqual({ ok: true });
   });
 
   it('escape hatch + port-mismatched .env passes (the .env URL is not used at runtime)', () => {
