@@ -1,0 +1,30 @@
+{
+  "name": "@pulse5/collector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "node ../../scripts/clean-dist.mjs && tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@pulse5/feeds": "workspace:^",
+    "@pulse5/models": "workspace:^",
+    "@pulse5/polymarket-v2": "workspace:^",
+    "@pulse5/storage": "workspace:^",
+    "pino": "^10.3.1"
+  }
+}
