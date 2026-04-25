@@ -2,3 +2,14 @@
 // Populated in Phase 2 (discovery) and Phase 3 (CLOB market WS wrapper).
 
 export const POLYMARKET_V2_VERSION = '0.1.0-skeleton';
+
+export {
+  parseBtcUpDownEventResponse,
+  type ParseResult,
+  type ParseSuccess,
+  type ParseFailure,
+  type ParsedBtcUpDownEvent,
+  type ParsedBtcUpDownMarket,
+  type UpDownTokens,
+  type ParseOptions,
+} from './discovery.js';

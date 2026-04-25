@@ -9,8 +9,7 @@ For the full rationale, strategy rules, EV formula, and long-term roadmap, see [
 
 ## 1. Status
 
-**Pre-implementation.** The repository currently contains only planning documents.
-Target of this plan: a runnable Pulse5 v0.1 data collector + replay-ready storage.
+**Phase 0 (monorepo bootstrap) complete.** Schema migrations and the test pipeline are wired up. Phases 1–5 (discovery, CLOB WS, RTDS, collector) are the next implementation targets.
 
 No trading. No wallet. No private key. No live order placement.
 
@@ -113,8 +112,9 @@ Everything else in [PULSE5_START.md](PULSE5_START.md) (schema, strategy rules, r
 | Wallet lib (peer of clob-client-v2) | `viem` |
 | DB | PostgreSQL 16 via Docker Compose |
 | DB client | `pg` (node-postgres) |
-| Migrations | `node-pg-migrate` (transactional, up/down, tracking table) |
-| Validation | `zod` |
+| DB migrations | `node-pg-migrate` (v8, TS migration files; transactional, up/down, tracking table) |
+| Env loading | `dotenv` (for db:migrate root `.env` resolution) |
+| Validation | `zod` (resolved to v4) |
 | Logging | `pino` |
 | Tests | `vitest` + a marked live-smoke suite |
 | Lint / format | `eslint` + `prettier` |
@@ -150,7 +150,7 @@ pulse5/
 │   │       └── btc-ticks.repo.ts
 │   ├── strategy/               # v0.2 — rule-based signals
 │   └── risk/                   # v0.3+ — kill switch
-├── migrations/                 # SQL files, applied in order
+├── migrations/                 # TypeScript node-pg-migrate files, applied in order
 ├── research/
 │   ├── notebooks/
 │   ├── replay/
@@ -173,23 +173,26 @@ Branch: **`feature/pulse5-v0.1-data-capture`** (create before any code; never co
 All phases use TDD: write unit tests first, make them pass, refactor. Target 80% coverage per package. Live smoke tests are the authoritative gate — unit tests alone are **not** sufficient.
 
 ### Phase 0 — Monorepo bootstrap
-- [ ] Initialize pnpm workspace, `tsconfig.base.json`, shared `eslint` + `prettier`.
-- [ ] `docker-compose.yml` with Postgres 16 + persistent volume.
-- [ ] `.env.example` listing every variable from §9.
-- [ ] Root scripts: `dev:collector`, `db:up`, `db:migrate`, `db:reset`, `test`, `test:smoke`, `typecheck`, `lint`.
+- [x] Initialize pnpm workspace, `tsconfig.base.json`, shared `eslint` + `prettier`.
+- [x] `docker-compose.yml` with Postgres 16 + persistent volume.
+- [x] `.env.example` listing every variable from §9.
+- [x] Root scripts: `dev:collector`, `db:up`, `db:wait`, `db:migrate`, `db:reset`, `test`, `test:smoke`, `typecheck`, `lint`.
 - [x] Decision log entry: **`pg` (node-postgres) + `node-pg-migrate`** — recorded in §5.
-- [ ] **Acceptance:** `pnpm install && pnpm typecheck && pnpm lint` all green on empty skeleton.
+- [x] **Acceptance:** `pnpm install && pnpm typecheck && pnpm lint` all green on empty skeleton.
 
 ### Phase 1 — Database migrations
-- [ ] SQL migrations for every table: `markets`, `raw_events`, `book_snapshots`, `btc_ticks`, `market_states`, `signals`, `orders`. Schemas are defined in [PULSE5_START.md §10](PULSE5_START.md).
-- [ ] Add indexes: `raw_events(source, event_type, receive_ts)`, `book_snapshots(market_id, ts)`, `btc_ticks(source, ts)`.
-- [ ] `pnpm db:migrate` applies cleanly; `pnpm db:reset` drops + re-applies.
-- [ ] Unit test: repository insert round-trip for each table.
-- [ ] **Acceptance:** schema creates from scratch on empty DB; all repo round-trip tests pass.
+Status legend: **[x]** = implemented & verified, **[~]** = implemented but unverified end-to-end, **[ ]** = not implemented.
+
+- [x] TypeScript `node-pg-migrate` migration file for every table: `markets`, `raw_events`, `book_snapshots`, `btc_ticks`, `market_states`, `signals`, `orders`. Schemas are defined in [PULSE5_START.md §10](PULSE5_START.md). _(Single initial migration `migrations/1714000000000_initial-schema.ts`.)_
+- [x] Add indexes in the migration: `raw_events(source, event_type, receive_ts)`, `book_snapshots(market_id, ts)`, `btc_ticks(source, ts)`, plus `markets(end_time)` and `raw_events(market_id, receive_ts)`.
+- [x] `pnpm db:migrate` / `pnpm db:reset` scripts wired with fail-closed behaviour: missing/unreachable `DATABASE_URL` exits non-zero, and `pnpm db:wait` exits fast (code 4) when the Docker daemon is unreachable instead of busy-waiting through the full timeout.
+- [x] **Live happy-path verified.** `pnpm db:reset` runs end-to-end on Docker Desktop: volume drop → fresh Postgres 16 → `db:wait` reports healthy in ~5 s → `node-pg-migrate` creates all 7 schema tables + 5 indexes + records the migration in `pgmigrations`. The two environment gotchas that bit us during the first verification run are now caught at the seam by `scripts/db-preflight.mjs` (run automatically before every migrate up/down): (1) any shell-exported `DATABASE_URL` that disagrees with root `.env` aborts with a redacted host/port/db diff before node-pg-migrate ever connects; (2) `PULSE5_PG_HOST_PORT` and the port inside `DATABASE_URL` must match on local hosts, otherwise migrations would land on a different cluster than `pnpm db:up` started. Both behaviours are documented below in §10 along with the `PULSE5_ALLOW_EXTERNAL_DATABASE_URL=1` escape hatch for CI / direnv setups.
+- [ ] Unit test: repository insert round-trip for each table. _(Repositories not yet implemented — lands with Phase 1 consumers.)_
+- [ ] **Acceptance:** schema creates from scratch on empty DB; all repo round-trip tests pass. _(Live DB happy-path is verified and the migration schema builds from a fresh DB; the remaining blocker is the repository layer plus insert round-trip tests for each table.)_
 
 ### Phase 2 — Market discovery (`packages/polymarket-v2/discovery.ts`)
 - [ ] `nextWindowTimestamp(now)` — floor to nearest 300 s boundary; unit-tested with fixed clock.
-- [ ] `discoverByWindow(ts)` — fetches `GET gamma-api.polymarket.com/events?slug=btc-updown-5m-{ts}`, validates with `zod`, returns `Market` model with event_id, market_id, slug, question, condition_id, up_token_id, down_token_id, start_time, end_time, price_to_beat, resolution_source.
+- [ ] `discoverByWindow(ts)` — fetches `GET gamma-api.polymarket.com/events?slug=btc-updown-5m-{ts}`, validates with `zod`, returns `Market` model with event_id, market_id, slug, question, condition_id, up_token_id, down_token_id, start_time, end_time, resolution_source. (gamma-api does NOT expose `price_to_beat` for these markets; it is captured separately as the Chainlink BTC/USD reading at the market's `start_time` and persisted by the collector via RTDS in Phase 4.)
 - [ ] Upserts into `markets` table.
 - [ ] Handles 404 (window not yet created) with backoff; logs but does not crash.
 - [ ] Unit tests with recorded Gamma fixtures (golden JSON).
@@ -224,9 +227,9 @@ All phases use TDD: write unit tests first, make them pass, refactor. Target 80%
 - [ ] **Acceptance:** `pnpm dev:collector` runs continuously, survives manual WS disconnect, logs health every 30 s.
 
 ### Phase 6 — Tests, smoke, and docs
-- [ ] Vitest coverage ≥80% on each package.
-- [ ] `pnpm test:smoke` runs live endpoint checks (clearly marked; requires network).
-- [ ] Expand README §10 (Setup & run) with exact commands actually used.
+- [x] Vitest coverage ≥80% per file (strict superset of per-package). _(Enforced via `vitest.config.ts` `coverage.thresholds.perFile: true`; a heavily-tested file in one package can no longer mask a near-zero file in another. Smoke coverage is expected to grow alongside CLOB/RTDS ingestion work in Phases 3–4, and can be skipped offline with `pnpm test:smoke:offline` (which auto-injects `PULSE5_SKIP_SMOKE_NETWORK=1`).)_
+- [x] `vitest.smoke.config.ts` exists, at least one smoke test, opt-out env flag documented. _(Live smoke probe of gamma-api in `packages/polymarket-v2/src/discovery.smoke.test.ts`; walks recent 5-minute window slugs and requires HTTP 200 plus a payload that parses into a slug-matched BTC Up/Down event with two distinct up/down token IDs on at least one window. 404, empty array, and token-shape-wrong payloads are rejected. **Note:** smoke does NOT assert a numeric `price_to_beat` because gamma-api does not expose one for these markets — resolution compares end-of-window BTC vs start-of-window BTC, and the collector captures the start-of-window Chainlink reading from RTDS at runtime (Phase 4). The parser still supports a `requirePriceToBeat` strict option exercised by unit tests in `discovery.test.ts` for callers that need it. Skip the live probe with `pnpm test:smoke:offline` (the config auto-injects `PULSE5_SKIP_SMOKE_NETWORK=1`).)_
+- [x] Expand README §10 (Setup & run) with exact commands actually used.
 - [ ] Add `research/replay/` README describing how to rebuild a market from `raw_events`.
 - [ ] **Acceptance:** `pnpm install && pnpm typecheck && pnpm lint && pnpm test && pnpm test:smoke` all green; a 24-hour collector run (manual) reconstructs ≥50 resolved markets from stored data.
 
@@ -253,10 +256,11 @@ Every raw event must preserve: `source`, `event_type`, `source_ts` (when provide
 ## 9. Environment variables
 
 Copy `.env.example` → `.env` before running.
+Root `.env` is the single source of truth; `pnpm db:migrate` reads it automatically via `dotenv`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | `postgres://pulse5:pulse5@localhost:5432/pulse5` | Postgres connection string |
+| `DATABASE_URL` | `postgres://pulse5:pulse5@localhost:5432/pulse5` | Postgres connection string (root `.env`; read by `pnpm db:migrate`) |
 | `POLYMARKET_GAMMA_API_URL` | `https://gamma-api.polymarket.com` | Discovery REST endpoint |
 | `POLYMARKET_CLOB_WS_URL` | `wss://ws-subscriptions-clob.polymarket.com/ws/market` | CLOB market channel |
 | `POLYMARKET_RTDS_WS_URL` | `wss://ws-live-data.polymarket.com` | Real-time data socket |
@@ -267,25 +271,72 @@ Copy `.env.example` → `.env` before running.
 
 ---
 
-## 10. Setup & run (target — will be accurate once Phase 0 lands)
+## 10. Setup & run
 
 ```bash
-# Prereqs: Node 20+, pnpm 9+, Docker Desktop.
+# Prereqs: Node 20+, pnpm 9+, Docker Desktop running.
+# Two gotchas worth knowing up front. Both are now enforced by
+# `scripts/db-preflight.mjs`, which runs before every db:migrate up/down
+# and aborts before any DB connection is opened:
+#   1. If your shell already exports DATABASE_URL (some teams set this
+#      globally), node-pg-migrate WILL use that and not the project .env —
+#      `dotenv` does not override existing env vars. The preflight fails
+#      fast on this case and prints a redacted host/port/db diff between
+#      the shell value and the root `.env` value. Fix by `unset
+#      DATABASE_URL` in this shell, or — for CI / direnv / advanced
+#      overrides — set `PULSE5_ALLOW_EXTERNAL_DATABASE_URL=1` to bypass
+#      the check.
+#   2. If your machine already runs Postgres on host 5432 (common on
+#      Windows / macOS), the docker container is shadowed. Set
+#      `PULSE5_PG_HOST_PORT=5433` in `.env` AND update DATABASE_URL's
+#      port to match; docker-compose.yml respects the override. The
+#      preflight enforces port equality on local hosts (localhost /
+#      127.0.0.1 / ::1) so the two values cannot drift silently.
 
 git checkout -b feature/pulse5-v0.1-data-capture
 
 pnpm install
 cp .env.example .env
+# Edit .env if 5432 is already in use locally: change PULSE5_PG_HOST_PORT
+# and DATABASE_URL's port together.
 
-pnpm db:up             # starts Postgres in Docker
-pnpm db:migrate        # applies SQL migrations
+pnpm db:up             # starts Postgres 16 in Docker
+pnpm db:wait           # blocks until the postgres container reports `healthy` via
+                       # docker inspect; cross-platform (Windows/PowerShell-safe).
+                       # Fails fast (exit 4) if the Docker daemon is unreachable,
+                       # so a stopped Docker Desktop does not waste the full timeout.
+                       # Exits non-zero on timeout (default 60 s, configurable via
+                       # PULSE5_PG_WAIT_TIMEOUT_MS).
+pnpm db:migrate        # runs scripts/db-preflight.mjs (shell-vs-.env DATABASE_URL diff
+                       # + PULSE5_PG_HOST_PORT/DATABASE_URL port-equality checks on
+                       # local hosts; never prints credentials), then applies
+                       # node-pg-migrate TS migrations via tsx (--tsx flag, v8). Exits
+                       # non-zero on preflight failure or missing/unreachable DB.
+                       # Set PULSE5_ALLOW_EXTERNAL_DATABASE_URL=1 only for deliberate
+                       # CI / direnv overrides.
+
+# Or, in one shot — drops the volume, starts Postgres, waits for healthy,
+# then migrates from scratch:
+pnpm db:reset          # docker compose down -v && up -d postgres && db:wait && db:migrate
 
 pnpm typecheck
 pnpm lint
-pnpm test              # unit tests, offline
-pnpm test:smoke        # live endpoint checks — requires network
+pnpm build             # produces dist/ in every workspace package
 
-pnpm dev:collector     # runs the collector continuously
+pnpm test              # unit tests + 80% coverage gate, enforced PER FILE (a
+                       # heavily-tested file cannot mask a near-zero file).
+pnpm test:smoke        # live smoke gate; hits real Polymarket endpoints (network required).
+                       # The probe walks recent 5-minute window slugs and requires at
+                       # least one HTTP 200 whose body parses into a slug-matched BTC
+                       # Up/Down event with two distinct up/down token IDs. 404, empty
+                       # array, and token-shape-wrong payloads all fail the gate.
+                       # NOTE: gamma-api does not expose price_to_beat for these
+                       # markets — that is captured at runtime from Chainlink/RTDS in
+                       # Phase 4. The strict-mode parser flag is exercised by unit
+                       # tests, not by smoke.
+pnpm test:smoke:offline # smoke tests offline; PULSE5_SKIP_SMOKE_NETWORK=1 auto-injected (NOT a release gate)
+
+pnpm dev:collector     # (Phases 3–5) runs the collector — currently a skeleton stub
 ```
 
 ---

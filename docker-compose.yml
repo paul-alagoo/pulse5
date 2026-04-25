@@ -7,8 +7,12 @@ services:
       POSTGRES_USER: pulse5
       POSTGRES_PASSWORD: pulse5
       POSTGRES_DB: pulse5
+    # Host-side port is parameterized so a system-installed Postgres on
+    # 5432 (common on Windows / macOS dev boxes) doesn't shadow the
+    # container. Override via root `.env` (PULSE5_PG_HOST_PORT) and keep
+    # DATABASE_URL's port matching.
     ports:
-      - '5432:5432'
+      - '${PULSE5_PG_HOST_PORT:-5432}:5432'
     volumes:
       - pulse5-pgdata:/var/lib/postgresql/data
     healthcheck:

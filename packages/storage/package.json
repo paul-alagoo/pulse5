@@ -3,12 +3,31 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc",
+    "build": "node ../../scripts/clean-dist.mjs && tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "migrate:up": "echo \"migrations land in Phase 1\" && exit 0"
+    "migrate:up": "node ../../scripts/db-preflight.mjs && node ./node_modules/node-pg-migrate/bin/node-pg-migrate.js up --migrations-dir ../../migrations --tsx --envPath ../../.env",
+    "migrate:down": "node ../../scripts/db-preflight.mjs && node ./node_modules/node-pg-migrate/bin/node-pg-migrate.js down --migrations-dir ../../migrations --tsx --envPath ../../.env",
+    "migrate:create": "node ./node_modules/node-pg-migrate/bin/node-pg-migrate.js create --migrations-dir ../../migrations --migration-file-language ts --envPath ../../.env"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "node-pg-migrate": "^8.0.4",
+    "pg": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.20.0"
   }
 }
