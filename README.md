@@ -9,7 +9,7 @@ For the full rationale, strategy rules, EV formula, and long-term roadmap, see [
 
 ## 1. Status
 
-**Phase 0 (monorepo bootstrap) complete.** Schema migrations and the test pipeline are wired up. Phases 1–5 (discovery, CLOB WS, RTDS, collector) are the next implementation targets.
+**Phases 0–6 implemented on branch `codex/v0.1-data-capture`.** Storage repositories, market discovery, CLOB WebSocket ingestion, RTDS BTC price ingestion, and the wired collector loop are all in place with unit tests; replay queries are documented in [research/replay/README.md](research/replay/README.md). The 5-minute, 15-minute, and 24-hour soak runs remain as manual / environment verifications — see Phase 6 acceptance criteria.
 
 No trading. No wallet. No private key. No live order placement.
 
@@ -34,11 +34,11 @@ A full research pass against GitHub, Polymarket docs, and prior-art trading bots
 
 | Need | Chosen solution |
 |---|---|
-| REST / future order placement | [`@polymarket/clob-client-v2`](https://github.com/Polymarket/clob-client-v2) v1.0.2 (viem-based) |
+| REST / future order placement | [`@polymarket/clob-client-v2`](https://github.com/Polymarket/clob-client-v2) v1.0.2 (viem-based) — **NOT used in v0.1**; v0.1 has no order placement |
 | Market WebSocket | `wss://ws-subscriptions-clob.polymarket.com/ws/market` — **public, no auth** |
-| WS wrapper with reconnect | [`@nevuamarkets/poly-websockets`](https://github.com/nevuamarkets/poly-websockets) (MIT) |
+| WS client | Pulse5-owned minimal `ws`-based client in [`packages/polymarket-v2/src/market-ws.ts`](packages/polymarket-v2/src/market-ws.ts) — sends the `custom_feature_enabled: true` subscription flag the upstream `@nevuamarkets/poly-websockets` wrapper does NOT plumb through, and handles all v0.1 event types (`book`, `price_change`, `best_bid_ask`, `new_market`, `market_resolved`, plus raw-only fallback for unknowns). |
 
-The `custom_feature_enabled: true` subscription flag activates `best_bid_ask`, `new_market`, and `market_resolved` events — adopted so resolution can be captured passively instead of polled.
+The `custom_feature_enabled: true` subscription flag activates `best_bid_ask`, `new_market`, and `market_resolved` events — required so resolution can be captured passively instead of polled.
 
 ### 3.2 Polymarket RTDS replaces three adapters
 
@@ -62,7 +62,7 @@ Every BTC 5-minute market has slug `btc-updown-5m-{ts}` where `ts` is a Unix tim
 | BTC price feeds | Custom Binance + Coinbase adapters | Single `packages/feeds` subscribing to RTDS `crypto_prices` + `crypto_prices_chainlink`. Coinbase deferred to v0.1.1 as optional cross-check. |
 | Chainlink price | Custom on-chain RPC reader (`AggregatorV3Interface`) | RTDS `crypto_prices_chainlink` — matches resolution semantics exactly. |
 | Market discovery | "Find active BTC Up/Down 5-minute markets" | Deterministic slug lookup every 300 s + CLOB `new_market` event as backup. |
-| CLOB WS client | Roll our own | Wrap [`@nevuamarkets/poly-websockets`](https://github.com/nevuamarkets/poly-websockets) inside `packages/polymarket-v2`. |
+| CLOB WS client | Roll our own | A minimal Pulse5-owned client in `packages/polymarket-v2/src/market-ws.ts` — required because the upstream `@nevuamarkets/poly-websockets` wrapper does not plumb the `custom_feature_enabled: true` flag the v0.1 spec requires for `best_bid_ask` / `new_market` / `market_resolved` events. |
 
 Everything else in [PULSE5_START.md](PULSE5_START.md) (schema, strategy rules, risk limits, success criteria) is unchanged.
 
@@ -82,8 +82,9 @@ Everything else in [PULSE5_START.md](PULSE5_START.md) (schema, strategy rules, r
 │                                                                  │
 │ ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐   │
 │ │ discovery-loop  │  │ ingest-clob     │  │ ingest-rtds      │   │
-│ │ (slug + gamma)  │  │ (@nevuamarkets/ │  │ (@polymarket/    │   │
-│ │                 │  │  poly-websockets)│ │  real-time-data) │   │
+│ │ (slug + gamma)  │  │ (Pulse5-owned   │  │ (@polymarket/    │   │
+│ │                 │  │  ws client w/   │  │  real-time-data) │   │
+│ │                 │  │  custom_feature)│  │                  │   │
 │ └────────┬────────┘  └────────┬────────┘  └─────────┬────────┘   │
 │          │                    │                     │            │
 │          └────────────────────┼─────────────────────┘            │
@@ -107,7 +108,7 @@ Everything else in [PULSE5_START.md](PULSE5_START.md) (schema, strategy rules, r
 | Runtime | Node.js 20+, TypeScript 5.x |
 | Package manager | pnpm workspaces (monorepo) |
 | Polymarket REST | `@polymarket/clob-client-v2` |
-| Polymarket CLOB WS | `@nevuamarkets/poly-websockets` |
+| Polymarket CLOB WS | Pulse5-owned `ws`-based client (sends `custom_feature_enabled: true`) |
 | Polymarket RTDS | `@polymarket/real-time-data-client` |
 | Wallet lib (peer of clob-client-v2) | `viem` |
 | DB | PostgreSQL 16 via Docker Compose |
@@ -131,15 +132,17 @@ pulse5/
 │   ├── executor/               # v0.3+ — paper/live execution
 │   └── dashboard/              # later
 ├── packages/
-│   ├── polymarket-v2/          # V2 SDK boundary (REST discovery + CLOB WS wrapper)
+│   ├── polymarket-v2/          # V2 SDK boundary (REST discovery + Pulse5-owned CLOB WS client)
 │   │   └── src/
-│   │       ├── discovery.ts    # deterministic slug + gamma-api
-│   │       ├── market-ws.ts    # wraps @nevuamarkets/poly-websockets
-│   │       └── types.ts
+│   │       ├── discovery.ts        # gamma-api parser
+│   │       ├── discovery-client.ts # gamma fetch wrapper
+│   │       ├── discovery-loop.ts   # deterministic slug + interval ticks (in-flight guarded)
+│   │       ├── windows.ts          # 300 s window math + slug builder
+│   │       └── market-ws.ts        # minimal `ws`-based CLOB client; sends custom_feature_enabled: true
 │   ├── feeds/                  # price-feed adapters
 │   │   └── src/
-│   │       ├── rtds.ts         # @polymarket/real-time-data-client
-│   │       └── types.ts
+│   │       ├── rtds-client.ts  # @polymarket/real-time-data-client wrapper
+│   │       └── rtds-parser.ts  # payload → BtcTick normalizer
 │   ├── models/                 # shared TS types (Market, BookSnapshot, Tick, ...)
 │   ├── storage/                # Postgres access layer (repository pattern)
 │   │   └── src/
@@ -168,7 +171,7 @@ pulse5/
 
 ## 7. v0.1 implementation plan
 
-Branch: **`feature/pulse5-v0.1-data-capture`** (create before any code; never commit to `main`).
+Branch: **`codex/v0.1-data-capture`** (active v0.1 branch; never commit to `main`).
 
 All phases use TDD: write unit tests first, make them pass, refactor. Target 80% coverage per package. Live smoke tests are the authoritative gate — unit tests alone are **not** sufficient.
 
@@ -183,55 +186,55 @@ All phases use TDD: write unit tests first, make them pass, refactor. Target 80%
 ### Phase 1 — Database migrations
 Status legend: **[x]** = implemented & verified, **[~]** = implemented but unverified end-to-end, **[ ]** = not implemented.
 
-- [x] TypeScript `node-pg-migrate` migration file for every table: `markets`, `raw_events`, `book_snapshots`, `btc_ticks`, `market_states`, `signals`, `orders`. Schemas are defined in [PULSE5_START.md §10](PULSE5_START.md). _(Single initial migration `migrations/1714000000000_initial-schema.ts`.)_
+- [x] TypeScript `node-pg-migrate` migration file for every table the v0.1 data-capture loop needs: `markets`, `raw_events`, `book_snapshots`, `btc_ticks`. Tables that belong to later phases (`market_states` for v0.2, `signals` for v0.2, `orders` for v0.3) are intentionally NOT created here — v0.1 does not predict, signal, or trade, and keeping the schema minimal in this branch makes that boundary enforceable at the database layer. Those tables land in their own migrations when their phases begin. Schemas are defined in [PULSE5_START.md §10](PULSE5_START.md). _(Single initial migration `migrations/1714000000000_initial-schema.ts`.)_
 - [x] Add indexes in the migration: `raw_events(source, event_type, receive_ts)`, `book_snapshots(market_id, ts)`, `btc_ticks(source, ts)`, plus `markets(end_time)` and `raw_events(market_id, receive_ts)`.
-- [x] `pnpm db:migrate` / `pnpm db:reset` scripts wired with fail-closed behaviour: missing/unreachable `DATABASE_URL` exits non-zero, and `pnpm db:wait` exits fast (code 4) when the Docker daemon is unreachable instead of busy-waiting through the full timeout.
-- [x] **Live happy-path verified.** `pnpm db:reset` runs end-to-end on Docker Desktop: volume drop → fresh Postgres 16 → `db:wait` reports healthy in ~5 s → `node-pg-migrate` creates all 7 schema tables + 5 indexes + records the migration in `pgmigrations`. The two environment gotchas that bit us during the first verification run are now caught at the seam by `scripts/db-preflight.mjs` (run automatically before every migrate up/down): (1) any shell-exported `DATABASE_URL` that disagrees with root `.env` aborts with a redacted host/port/db diff before node-pg-migrate ever connects; (2) `PULSE5_PG_HOST_PORT` and the port inside `DATABASE_URL` must match on local hosts, otherwise migrations would land on a different cluster than `pnpm db:up` started. Both behaviours are documented below in §10 along with the `PULSE5_ALLOW_EXTERNAL_DATABASE_URL=1` escape hatch for CI / direnv setups.
-- [ ] Unit test: repository insert round-trip for each table. _(Repositories not yet implemented — lands with Phase 1 consumers.)_
-- [ ] **Acceptance:** schema creates from scratch on empty DB; all repo round-trip tests pass. _(Live DB happy-path is verified and the migration schema builds from a fresh DB; the remaining blocker is the repository layer plus insert round-trip tests for each table.)_
+- [x] `pnpm db:migrate` / `pnpm db:reset` scripts wired with fail-closed behaviour: missing/unreachable `DATABASE_URL` exits non-zero, and `pnpm db:wait` exits fast (code 4) when the Docker daemon is unreachable instead of busy-waiting through the full timeout. The migration runner now reuses the same connection-resolution rules as the runtime collector — when `DATABASE_URL` is unset in both shell env and root `.env`, it loads connection info from `C:\postgres.json` (or `PULSE5_PG_CONFIG_PATH`) and synthesises a DSN in-memory for `node-pg-migrate`. The synthesised value is passed via the child process env only; the password never lands on disk and is redacted in any log output. See [scripts/run-migrate.mjs](scripts/run-migrate.mjs) and the unit tests in [scripts/run-migrate.test.ts](scripts/run-migrate.test.ts).
+- [x] **Live happy-path verified.** `pnpm db:reset` runs end-to-end on Docker Desktop: volume drop → fresh Postgres 16 → `db:wait` reports healthy in ~5 s → `node-pg-migrate` creates the v0.1 data-capture schema (4 tables: `markets`, `raw_events`, `book_snapshots`, `btc_ticks` + 5 indexes) and records the migration in `pgmigrations`. The two environment gotchas that bit us during the first verification run are now caught at the seam by `scripts/db-preflight.mjs` (run automatically before every migrate up/down): (1) any shell-exported `DATABASE_URL` that disagrees with root `.env` aborts with a redacted host/port/db diff before node-pg-migrate ever connects; (2) `PULSE5_PG_HOST_PORT` and the port inside `DATABASE_URL` must match on local hosts, otherwise migrations would land on a different cluster than `pnpm db:up` started. Both behaviours are documented below in §10 along with the `PULSE5_ALLOW_EXTERNAL_DATABASE_URL=1` escape hatch for CI / direnv setups.
+- [x] Unit test: repository insert round-trip for each v0.1 table. _(Implemented in `packages/storage/src/repos.test.ts`; the four v0.1 repos — `markets`, `raw_events`, `book_snapshots`, `btc_ticks` — each round-trip through an in-memory `Db` mock, with the `raw_events.id ↔ book_snapshots.raw_event_id` / `btc_ticks.raw_event_id` linkage exercised end-to-end.)_
+- [x] **Acceptance:** schema creates from scratch on empty DB; all repo round-trip tests pass. _(Live DB happy-path is verified, the migration applies cleanly on a fresh database, and the per-repo round-trip suite is green. v0.2 / v0.3 tables (`market_states`, `signals`, `orders`) are intentionally NOT in this migration — they land in their own phase migrations.)_
 
-### Phase 2 — Market discovery (`packages/polymarket-v2/discovery.ts`)
-- [ ] `nextWindowTimestamp(now)` — floor to nearest 300 s boundary; unit-tested with fixed clock.
-- [ ] `discoverByWindow(ts)` — fetches `GET gamma-api.polymarket.com/events?slug=btc-updown-5m-{ts}`, validates with `zod`, returns `Market` model with event_id, market_id, slug, question, condition_id, up_token_id, down_token_id, start_time, end_time, resolution_source. (gamma-api does NOT expose `price_to_beat` for these markets; it is captured separately as the Chainlink BTC/USD reading at the market's `start_time` and persisted by the collector via RTDS in Phase 4.)
-- [ ] Upserts into `markets` table.
-- [ ] Handles 404 (window not yet created) with backoff; logs but does not crash.
-- [ ] Unit tests with recorded Gamma fixtures (golden JSON).
-- [ ] Live smoke: hit the real endpoint for the current window, assert shape.
-- [ ] **Acceptance:** running the discovery loop for 15 minutes populates ≥3 markets with valid token IDs.
+### Phase 2 — Market discovery (`packages/polymarket-v2/src/discovery*.ts` + `windows.ts`)
+- [x] `floorToWindow(now)` / `slugForWindow(ts)` / `planWindowSlugs(now)` — 300 s grid math; unit-tested with fixed clock in `windows.test.ts`.
+- [x] `createDiscoveryClient` — fetches `GET gamma-api.polymarket.com/events?slug=btc-updown-5m-{ts}`, parses with `parseBtcUpDownEventResponse`, returns a `Market` model with event_id, market_id, slug, question, condition_id, up_token_id, down_token_id, start_time, end_time, resolution_source. (gamma-api does NOT expose `price_to_beat` for these markets; it is captured separately as the Chainlink BTC/USD reading at the market's `start_time` and persisted by the collector via RTDS in Phase 4.)
+- [x] `createDiscoveryLoop` — upserts into `markets` table via the storage repo, with an in-flight guard so a slow Gamma response cannot stack ticks.
+- [x] Handles 404 (window not yet created) and parse failures without crashing; logs and continues.
+- [x] Unit tests with recorded Gamma fixtures (golden JSON) in `discovery-client.test.ts` + loop tests in `discovery-loop.test.ts`.
+- [x] Live smoke probe in `discovery.smoke.test.ts` (run with `pnpm test:smoke`; opt out via `pnpm test:smoke:offline`).
+- [ ] **Acceptance:** running the discovery loop for 15 minutes populates ≥3 markets with valid token IDs. _(Manual / live verification — see "Live verification" notes at the end of this section.)_
 
-### Phase 3 — CLOB market WebSocket ingestion (`packages/polymarket-v2/market-ws.ts` + `apps/collector/ingest-clob.ts`)
-- [ ] Wrap `@nevuamarkets/poly-websockets` with `custom_feature_enabled: true`.
-- [ ] Handlers persist **raw** payloads to `raw_events` (always) AND normalize to `book_snapshots` for `book` and `best_bid_ask` events.
-- [ ] Every event carries `source_ts` (from payload) and `receive_ts` (from `Date.now()`).
-- [ ] Subscribe on discovery; unsubscribe on `market_resolved` (mark `markets.status='resolved'`, `final_outcome`).
-- [ ] Unknown event types are stored as `raw_events` without crashing.
-- [ ] Log reconnect events; expose a `healthcheck()` returning last-event-age per token.
-- [ ] Unit tests: normalization functions with recorded fixtures for each event type.
-- [ ] Live smoke: subscribe to one real BTC 5m market, verify ≥1 book + ≥1 price_change received within 30 s.
-- [ ] **Acceptance:** 5-minute live run on one market produces coherent raw + normalized rows; reconnect survives a manual disconnect.
+### Phase 3 — CLOB market WebSocket ingestion (`packages/polymarket-v2/src/market-ws.ts` + `apps/collector/src/collector.ts`)
+- [x] Pulse5-owned `ws`-based CLOB client that sends the init handshake `{ type: 'market', assets_ids: [...], custom_feature_enabled: true }` AND repeats `custom_feature_enabled: true` on every subsequent `subscribe` / `unsubscribe` operation. The flag is also re-sent in the init payload after every reconnect, so the connection-wide feature set never silently degrades.
+- [x] Handlers persist **raw** payloads to `raw_events` (always) AND normalize to `book_snapshots` for `book`, `price_change`, and `best_bid_ask` events. `new_market` and `market_resolved` are raw-only (replay can derive them from `markets.end_time` + the final book snapshot).
+- [x] Every event carries `source_ts` (from payload `timestamp` when present) and `receive_ts` (from `Date.now()`); the linkage `raw_events.id ↔ book_snapshots.raw_event_id` is stamped at insert time.
+- [x] Subscribe on discovery (the collector's `subscription-manager` registry tracks (market_id, token_id)); explicit `unsubscribe` is wired but not yet triggered by `market_resolved` (resolution detection is currently end_time-based — `market_resolved` lands as a raw event for replay).
+- [x] Unknown event types are stored as `raw_events` (`event_type='unknown'`) without crashing; verified by unit test.
+- [x] Log reconnect events; per-source last-event age is exposed by the collector's health metrics snapshot.
+- [x] Unit tests: normalization functions, init handshake, delta subscribe / unsubscribe ops carrying the flag, reconnect re-sending the desired set, fragmented `Buffer[]` payloads, ArrayBuffer payloads, PONG keepalive frames, garbage payloads, missing `event_type`.
+- [ ] Live smoke: subscribe to one real BTC 5m market, verify ≥1 book + ≥1 price_change received within 30 s. _(Manual / live verification.)_
+- [ ] **Acceptance:** 5-minute live run on one market produces coherent raw + normalized rows; reconnect survives a manual disconnect. _(Manual / live verification.)_
 
-### Phase 4 — RTDS price ingestion (`packages/feeds/rtds.ts` + `apps/collector/ingest-rtds.ts`)
-- [ ] Single client subscribing to two subscriptions: `crypto_prices` (`btcusdt`) and `crypto_prices_chainlink` (`btc/usd`).
-- [ ] PING every 5 s per docs; auto-reconnect on drop.
-- [ ] Persist raw payloads to `raw_events` (`source='rtds.binance'` or `source='rtds.chainlink'`).
-- [ ] Normalize to `btc_ticks` with payload `timestamp` as `source_ts`, local receive time as `receive_ts`, and `latency_ms = receive_ts - source_ts`.
-- [ ] Unit tests: payload → tick normalization for both topics.
-- [ ] Live smoke: connect for 60 s, assert ≥10 ticks per source.
-- [ ] **Acceptance:** 5-minute live run produces both sources at expected cadence; latency histogram logged.
+### Phase 4 — RTDS price ingestion (`packages/feeds/src/rtds-client.ts` + `rtds-parser.ts`)
+- [x] Single client subscribing to two subscriptions: `crypto_prices` (`btcusdt`) and `crypto_prices_chainlink` (`btc/usd`); subscriptions re-sent on every reconnect.
+- [x] PING every 5 s (default) via `@polymarket/real-time-data-client`; auto-reconnect handled by the upstream client.
+- [x] Persists raw payloads to `raw_events` (`source='rtds.binance'` or `source='rtds.chainlink'`); unknown topics persist as `source='rtds.unknown'` for audit.
+- [x] Normalizes to `btc_ticks` with payload `timestamp` as `source_ts`, local receive time as `receive_ts`, and `latency_ms = receive_ts - source_ts`. The `raw_events.id` is threaded through into `btc_ticks.raw_event_id`.
+- [x] Unit tests: payload → tick normalization for both topics, parse-failure path (raw saved, no tick), error-propagation paths.
+- [ ] Live smoke: connect for 60 s, assert ≥10 ticks per source. _(Manual / live verification.)_
+- [ ] **Acceptance:** 5-minute live run produces both sources at expected cadence; latency histogram logged. _(Manual / live verification.)_
 
-### Phase 5 — Collector app wiring + health logging (`apps/collector`)
-- [ ] Entrypoint wires: discovery-loop → CLOB WS subscription manager → RTDS client → storage repos.
-- [ ] `pino` structured logs with required fields: `component`, `market_id`, `token_id`, `event_type`, `source_ts`, `receive_ts`, `latency_ms`.
-- [ ] Periodic (every 30 s) health line: counts of raw/normalized events written, per-source last-event age, active subscriptions.
-- [ ] Graceful shutdown: close WS, flush DB, exit non-zero on fatal.
-- [ ] **Acceptance:** `pnpm dev:collector` runs continuously, survives manual WS disconnect, logs health every 30 s.
+### Phase 5 — Collector app wiring + health logging (`apps/collector/src/{collector,index,health,subscription-manager}.ts`)
+- [x] Entrypoint wires discovery-loop → Pulse5-owned CLOB WS client → RTDS client → storage repos. Windows-safe entrypoint detection (`isEntrypoint`) ensures `pnpm dev:collector` actually invokes `runCollector()` on Windows back-slash paths.
+- [x] `pino` structured logs with required fields: `component`, `market_id`, `token_id`, `event_type`, `source_ts`, `receive_ts`, `latency_ms`.
+- [x] Periodic health line (every `HEALTH_LOG_INTERVAL_MS`, default 30 s): counts of raw/normalized events written, per-source last-event age, active subscriptions, CLOB / RTDS connection status. `validatePositiveIntervalMs` rejects NaN/0/negative env input so the timer cannot become a hot loop.
+- [x] Graceful shutdown on SIGINT/SIGTERM: stop discovery, RTDS, CLOB; close pg pool; exit non-zero on fatal.
+- [ ] **Acceptance:** `pnpm dev:collector` runs continuously, survives manual WS disconnect, logs health every 30 s. _(Manual / live verification.)_
 
 ### Phase 6 — Tests, smoke, and docs
 - [x] Vitest coverage ≥80% per file (strict superset of per-package). _(Enforced via `vitest.config.ts` `coverage.thresholds.perFile: true`; a heavily-tested file in one package can no longer mask a near-zero file in another. Smoke coverage is expected to grow alongside CLOB/RTDS ingestion work in Phases 3–4, and can be skipped offline with `pnpm test:smoke:offline` (which auto-injects `PULSE5_SKIP_SMOKE_NETWORK=1`).)_
 - [x] `vitest.smoke.config.ts` exists, at least one smoke test, opt-out env flag documented. _(Live smoke probe of gamma-api in `packages/polymarket-v2/src/discovery.smoke.test.ts`; walks recent 5-minute window slugs and requires HTTP 200 plus a payload that parses into a slug-matched BTC Up/Down event with two distinct up/down token IDs on at least one window. 404, empty array, and token-shape-wrong payloads are rejected. **Note:** smoke does NOT assert a numeric `price_to_beat` because gamma-api does not expose one for these markets — resolution compares end-of-window BTC vs start-of-window BTC, and the collector captures the start-of-window Chainlink reading from RTDS at runtime (Phase 4). The parser still supports a `requirePriceToBeat` strict option exercised by unit tests in `discovery.test.ts` for callers that need it. Skip the live probe with `pnpm test:smoke:offline` (the config auto-injects `PULSE5_SKIP_SMOKE_NETWORK=1`).)_
 - [x] Expand README §10 (Setup & run) with exact commands actually used.
-- [ ] Add `research/replay/` README describing how to rebuild a market from `raw_events`.
-- [ ] **Acceptance:** `pnpm install && pnpm typecheck && pnpm lint && pnpm test && pnpm test:smoke` all green; a 24-hour collector run (manual) reconstructs ≥50 resolved markets from stored data.
+- [x] Add `research/replay/` README describing how to rebuild a market from `raw_events`. _(See [research/replay/README.md](research/replay/README.md).)_
+- [ ] **Acceptance:** `pnpm install && pnpm typecheck && pnpm lint && pnpm test && pnpm test:smoke` all green; a 24-hour collector run (manual) reconstructs ≥50 resolved markets from stored data. _(Unit gate: green. 24-hour soak: manual / live verification.)_
 
 ---
 
@@ -239,15 +242,15 @@ Status legend: **[x]** = implemented & verified, **[~]** = implemented but unver
 
 Authoritative definitions live in [PULSE5_START.md §10](PULSE5_START.md). Quick reference:
 
-| Table | Purpose | Primary key |
-|---|---|---|
-| `markets` | One row per discovered BTC 5m market | `market_id` |
-| `raw_events` | Append-only audit log of every WS/REST payload | `id` (BIGSERIAL) |
-| `book_snapshots` | Normalized top-of-book per token over time | `(ts, market_id, token_id)` |
-| `btc_ticks` | Normalized BTC price ticks from RTDS | `(ts, source, symbol)` |
-| `market_states` | v0.2 — 100–250 ms feature snapshots | `(ts, market_id)` |
-| `signals` | v0.2 — accepted + rejected signal decisions | `id` |
-| `orders` | v0.3+ — paper/live order lifecycle | `id` |
+| Table | Purpose | Primary key | Created in v0.1 migration? |
+|---|---|---|---|
+| `markets` | One row per discovered BTC 5m market | `market_id` | Yes |
+| `raw_events` | Append-only audit log of every WS/REST payload | `id` (BIGSERIAL) | Yes |
+| `book_snapshots` | Normalized top-of-book per token over time | `(ts, market_id, token_id)` | Yes |
+| `btc_ticks` | Normalized BTC price ticks from RTDS | `(ts, source, symbol)` | Yes |
+| `market_states` | v0.2 — 100–250 ms feature snapshots | `(ts, market_id)` | **No** — created by the v0.2 signal-engine migration |
+| `signals` | v0.2 — accepted + rejected signal decisions | `id` | **No** — created by the v0.2 signal-engine migration |
+| `orders` | v0.3+ — paper/live order lifecycle | `id` | **No** — created by the v0.3 execution migration |
 
 Every raw event must preserve: `source`, `event_type`, `source_ts` (when provided), `receive_ts`, `ingest_ts`, `market_id` (when applicable), `token_id` (when applicable), and the full raw JSON.
 
@@ -293,7 +296,7 @@ Root `.env` is the single source of truth; `pnpm db:migrate` reads it automatica
 #      preflight enforces port equality on local hosts (localhost /
 #      127.0.0.1 / ::1) so the two values cannot drift silently.
 
-git checkout -b feature/pulse5-v0.1-data-capture
+git checkout codex/v0.1-data-capture   # active v0.1 branch; do not commit to main
 
 pnpm install
 cp .env.example .env

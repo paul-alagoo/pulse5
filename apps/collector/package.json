@@ -26,5 +26,8 @@
     "@pulse5/polymarket-v2": "workspace:^",
     "@pulse5/storage": "workspace:^",
     "pino": "^10.3.1"
+  },
+  "devDependencies": {
+    "@polymarket/real-time-data-client": "^1.4.0"
   }
 }

@@ -20,6 +20,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@polymarket/real-time-data-client": "^1.4.0"
+    "@polymarket/real-time-data-client": "^1.4.0",
+    "@pulse5/models": "workspace:^"
   }
 }

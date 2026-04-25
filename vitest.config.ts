@@ -23,7 +23,16 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'html'],
       include: ['packages/*/src/**', 'apps/*/src/**'],
-      exclude: ['**/*.test.ts', '**/*.smoke.test.ts', '**/dist/**'],
+      exclude: [
+        '**/*.test.ts',
+        '**/*.smoke.test.ts',
+        '**/dist/**',
+        // Production composition / runtime wiring — exercised only in
+        // `pnpm dev:collector` against a live Postgres + Polymarket
+        // WS. Covered by manual / soak verification, not unit tests.
+        'apps/collector/src/index.ts',
+        'packages/storage/src/client.ts',
+      ],
       thresholds: {
         perFile: true,
         lines: 80,
