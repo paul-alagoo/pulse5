@@ -7,6 +7,7 @@ import {
   createHealthMetrics,
   createClobSubscriptionRegistry,
   isEntrypoint,
+  isShadowSignalsEnabled,
   validatePositiveIntervalMs,
 } from './index.js';
 
@@ -88,5 +89,30 @@ describe('validatePositiveIntervalMs', () => {
   it('falls back on non-integer input to avoid sub-millisecond chatter', () => {
     expect(validatePositiveIntervalMs('1.5', 5000)).toBe(5000);
     expect(validatePositiveIntervalMs(1.5, 5000)).toBe(5000);
+  });
+});
+
+describe('isShadowSignalsEnabled (v0.2 env flag)', () => {
+  it('returns false when the env var is unset / null / empty', () => {
+    expect(isShadowSignalsEnabled(undefined)).toBe(false);
+    expect(isShadowSignalsEnabled('')).toBe(false);
+    expect(isShadowSignalsEnabled('   ')).toBe(false);
+  });
+
+  it('returns false for explicit-disable values (0, false, no)', () => {
+    expect(isShadowSignalsEnabled('0')).toBe(false);
+    expect(isShadowSignalsEnabled('false')).toBe(false);
+    expect(isShadowSignalsEnabled('FALSE')).toBe(false);
+    expect(isShadowSignalsEnabled('no')).toBe(false);
+  });
+
+  it('returns true on the documented enable token "1"', () => {
+    expect(isShadowSignalsEnabled('1')).toBe(true);
+  });
+
+  it('treats any other truthy-looking string as enabled', () => {
+    expect(isShadowSignalsEnabled('true')).toBe(true);
+    expect(isShadowSignalsEnabled('yes')).toBe(true);
+    expect(isShadowSignalsEnabled('on')).toBe(true);
   });
 });

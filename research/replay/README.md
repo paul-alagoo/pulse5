@@ -1,7 +1,8 @@
-# Pulse5 v0.1 — Replay
+# Pulse5 — Replay (v0.1 capture + v0.2 shadow signals)
 
 This directory documents how to **rebuild a single BTC 5-minute Up/Down
-market from stored data** without rerunning the live collector.
+market from stored data** without rerunning the live collector, and — under
+v0.2 — how to score that rebuilt state with the shadow signal engine.
 
 The collector persists four tables that together are sufficient to
 reconstruct every market it observed:
@@ -13,9 +14,13 @@ reconstruct every market it observed:
 | `book_snapshots`  | Normalized top-of-book per token over time, keyed by `(ts, market_id, token_id)`. |
 | `btc_ticks`       | Normalized BTC price ticks from RTDS Binance + Chainlink, keyed by `(ts, source, symbol)`. |
 
+v0.2 adds two analytical tables on top — `market_states` and `signals` —
+populated by the same pure logic the live collector uses (see §8 below).
+
 The collector is **strictly read-only at the boundary**: it does not place
 orders, sign transactions, or hold a wallet. Replay therefore only ever
-reads from these tables.
+reads from these tables. v0.2 keeps that contract — no orders, no wallet,
+no signer, no paper trading.
 
 ## 0. Prerequisites
 
@@ -217,8 +222,112 @@ The `replay_ready_markets` count is the v0.1 success metric. Target:
 ## 6. Out of scope (v0.1)
 
 - Replay does **not** simulate orders, fills, or PnL — that lands in v0.3.
-- No prediction model is run during replay — that lands in v0.2.
-- No wallet, no signing, no live or paper trading at any point in v0.1.
+- No wallet, no signing, no live or paper trading at any point.
+- v0.2 layers a **shadow signal engine** on top of replay (see §8) but
+  still does not trade.
+
+## 8. v0.2 Shadow Signal Engine — replay flow
+
+v0.2 adds three pure functions in [`packages/strategy`](../../packages/strategy):
+
+- `buildMarketState({ market, upBook, downBook, chainlinkTick, binanceTick, … }, config)`
+- `generateSignal(state, config)`
+- `labelSignalOutcome({ signal, rawFinalOutcome, resolvedAt })`
+
+In **this PR**, the replay path is the only consumer of these functions
+that also writes to the `market_states` / `signals` tables. The collector
+exposes `PULSE5_ENABLE_SHADOW_SIGNALS=1` as a marker-only flag — it logs
+a single observation line and does **not** build state or generate
+signals at runtime. Live periodic emission is deferred to a follow-up
+PR, which will reuse the exact same pure functions exercised here, so
+there will still be no separate replay-only engine when it lands.
+
+### 8a. No-lookahead rule
+
+Replay must construct each `MarketState` using **only data visible at the
+target timestamp `t`**. Concretely:
+
+- For `chainlinkTick` / `binanceTick`, query the latest tick with
+  `receive_ts <= t`. **Do not** use `receive_ts` from the future.
+- For `upBook` / `downBook`, query the latest `book_snapshots` row per
+  token with `receive_ts <= t`. **Do not** use future snapshots.
+- For the `price_to_beat` Chainlink fallback (§8b), the same `receive_ts
+  <= t` filter applies — even though that query orders by `ts` proximity
+  to `market.start_time`, candidate rows must have already been received
+  at the replay target.
+- The state builder and signal engine **never** read
+  `markets.final_outcome` or `markets.status`. Those are only consulted by
+  the outcome labeler, and only after the underlying market has resolved.
+
+```sql
+-- Latest BTC tick visible at timestamp t.
+SELECT * FROM btc_ticks
+ WHERE source = 'rtds.chainlink'
+   AND receive_ts <= $1::timestamptz
+ ORDER BY receive_ts DESC
+ LIMIT 1;
+
+-- Latest top-of-book per token visible at timestamp t.
+SELECT * FROM book_snapshots
+ WHERE market_id = $1 AND token_id = $2 AND receive_ts <= $3::timestamptz
+ ORDER BY receive_ts DESC
+ LIMIT 1;
+```
+
+### 8b. price_to_beat fallback
+
+`markets.price_to_beat` is *not* always populated by v0.1's discovery
+(gamma-api responses sometimes omit it). The state builder applies an
+explicit fallback:
+
+1. Prefer `market.priceToBeat` when present.
+2. Otherwise, derive from the **Chainlink BTC tick nearest
+   `market.startTime`** within
+   `config.priceToBeatToleranceMs` (default 10 s) **whose `receive_ts <=
+   targetTimestamp`** (the no-lookahead rule from §8a applies to the
+   fallback query too — a tick emitted near `start_time` but received
+   *after* the replay target is still in the future relative to the
+   moment we are scoring and must NOT be used).
+3. If neither is available, `dataComplete = false` and the engine rejects
+   with `PRICE_TO_BEAT_MISSING`.
+
+Documented as a **v0.2 fallback for shadow scoring**, not a tuned trading
+assumption.
+
+```sql
+-- Chainlink tick nearest market.start_time, restricted to ticks already
+-- received at timestamp t.
+SELECT * FROM btc_ticks
+ WHERE source = 'rtds.chainlink'
+   AND receive_ts <= $2::timestamptz
+ ORDER BY ABS(EXTRACT(EPOCH FROM (ts - $1::timestamptz)))
+ LIMIT 1;
+```
+
+### 8c. outcome vs. final_outcome
+
+`signals` records two separate fields after labeling:
+
+| Column           | What it is                                                |
+| ---------------- | --------------------------------------------------------- |
+| `final_outcome`  | Normalized market settlement snapshot (`UP` \| `DOWN`).   |
+| `outcome`        | Signal scoring (`WIN` \| `LOSS` \| `NOT_APPLICABLE`).     |
+
+Rules:
+
+- Accepted `BUY_UP` wins iff `final_outcome = UP`.
+- Accepted `BUY_DOWN` wins iff `final_outcome = DOWN`.
+- Accepted losers get `LOSS`.
+- Rejected signals always get `NOT_APPLICABLE` — they made no claim, so
+  scoring is undefined. Their `final_outcome` is still recorded for
+  analytics.
+
+### 8d. A small example
+
+[`replay-market.ts`](./replay-market.ts) walks one resolved market end to
+end: pull v0.1 data, build a state, generate a shadow signal, label the
+outcome, persist to v0.2 tables. It is intentionally minimal — not a batch
+runner or dashboard.
 
 ## 7. Pointers to the implementation
 
