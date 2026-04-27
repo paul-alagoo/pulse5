@@ -11,6 +11,14 @@ import type { Db } from './client.js';
  */
 export interface MarketStatesRepository {
   insert(state: MarketState): Promise<bigint>;
+  /**
+   * v0.2.1 idempotent insert. Returns the existing id when a row already
+   * exists for `(market_id, ts)` (the unique constraint added in
+   * `migrations/1714000000002_v0.2.1-shadow-batch-replay.ts`), otherwise
+   * inserts and returns the new id. Used by batch replay so re-running the
+   * same persisted window never stacks duplicate rows.
+   */
+  insertIfAbsent(state: MarketState): Promise<{ id: bigint; inserted: boolean }>;
   findById(id: bigint): Promise<MarketState | null>;
   countByMarket(marketId: string): Promise<number>;
 }
@@ -130,6 +138,79 @@ export function createMarketStatesRepository(db: Db): MarketStatesRepository {
         throw new Error('market_states insert returned no id');
       }
       return BigInt(idStr);
+    },
+
+    async insertIfAbsent(
+      state: MarketState
+    ): Promise<{ id: bigint; inserted: boolean }> {
+      // ON CONFLICT DO NOTHING returns zero rows when the unique index hits,
+      // so we follow up with a SELECT for the existing id. The two-step
+      // dance is intentional — using ON CONFLICT DO UPDATE would silently
+      // overwrite the original state row, which we never want for replay
+      // determinism (the row already there came from an earlier run that
+      // saw the same inputs).
+      const insert = await db.query<IdRow>(
+        `INSERT INTO market_states (
+           ts, market_id,
+           btc_price, btc_source,
+           price_to_beat, distance, distance_bps,
+           time_remaining_ms,
+           up_best_bid, up_best_ask, down_best_bid, down_best_ask,
+           up_spread, down_spread,
+           btc_tick_age_ms, up_book_age_ms, down_book_age_ms,
+           chainlink_binance_gap_bps,
+           data_complete, stale
+         ) VALUES (
+           $1, $2,
+           $3, $4,
+           $5, $6, $7,
+           $8,
+           $9, $10, $11, $12,
+           $13, $14,
+           $15, $16, $17,
+           $18,
+           $19, $20
+         )
+         ON CONFLICT (market_id, ts) DO NOTHING
+         RETURNING id`,
+        [
+          state.ts,
+          state.marketId,
+          state.btcPrice,
+          state.btcSource,
+          state.priceToBeat,
+          state.distance,
+          state.distanceBps,
+          state.timeRemainingMs,
+          state.upBestBid,
+          state.upBestAsk,
+          state.downBestBid,
+          state.downBestAsk,
+          state.upSpread,
+          state.downSpread,
+          state.btcTickAgeMs,
+          state.upBookAgeMs,
+          state.downBookAgeMs,
+          state.chainlinkBinanceGapBps,
+          state.dataComplete,
+          state.stale,
+        ]
+      );
+      const insertedId = insert.rows[0]?.id;
+      if (insertedId) {
+        return { id: BigInt(insertedId), inserted: true };
+      }
+      const existing = await db.query<IdRow>(
+        `SELECT id FROM market_states WHERE market_id = $1 AND ts = $2`,
+        [state.marketId, state.ts]
+      );
+      const existingId = existing.rows[0]?.id;
+      if (!existingId) {
+        throw new Error(
+          'market_states insertIfAbsent: conflict reported but no existing row found'
+        );
+      }
+      return { id: BigInt(existingId), inserted: false };
     },
 
     async findById(id: bigint): Promise<MarketState | null> {

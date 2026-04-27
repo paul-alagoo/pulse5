@@ -20,7 +20,7 @@
     "test": "vitest run",
     "migrate:up": "node ../../scripts/db-preflight.mjs && node ../../scripts/run-migrate.mjs up",
     "migrate:down": "node ../../scripts/db-preflight.mjs && node ../../scripts/run-migrate.mjs down",
-    "migrate:create": "node ../../node_modules/node-pg-migrate/bin/node-pg-migrate.js create --migrations-dir ../../migrations --migration-file-language ts --envPath ../../.env"
+    "migrate:create": "node ../../scripts/run-migrate.mjs create"
   },
   "dependencies": {
     "@pulse5/models": "workspace:^",

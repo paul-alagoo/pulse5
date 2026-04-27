@@ -1,10 +1,14 @@
 import { describe, it, expect } from 'vitest';
+import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import {
   redactDsn,
   parsePostgresFile,
   selectDatabase,
   buildDatabaseUrl,
   resolveConnection,
+  resolveNodePgMigrateBin,
+  buildNodePgMigrateArgs,
 } from './run-migrate.mjs';
 
 const PASSWORD_FIXTURE = 'super-secret-pw-do-not-leak';
@@ -169,5 +173,104 @@ describe('resolveConnection — env priority', () => {
     });
     expect(result.dsn).toBe(`postgres://u:${PASSWORD_FIXTURE}@h:5432/d`);
     expect(result.redacted).not.toContain(PASSWORD_FIXTURE);
+  });
+});
+
+describe('resolveNodePgMigrateBin', () => {
+  it('prefers the root node_modules path when present', () => {
+    const repoRoot = path.join('workspace', 'pulse5');
+    const expected = path.join(
+      'node_modules',
+      'node-pg-migrate',
+      'bin',
+      'node-pg-migrate.js'
+    );
+    const result = resolveNodePgMigrateBin({
+      repoRoot,
+      exists: (p: string) => p.endsWith(expected),
+      pnpmDirEntries: () => {
+        throw new Error('pnpm fallback should not be needed');
+      },
+    });
+
+    expect(result).toBe(path.join(repoRoot, expected));
+  });
+
+  it('falls back to pnpm virtual-store layout when root node_modules has no symlink', () => {
+    const repoRoot = path.join('workspace', 'pulse5');
+    const pnpmEntry = 'node-pg-migrate@8.0.4_@types+pg@8.20.0_pg@8.20.0';
+    const expected = path.join(
+      'node_modules',
+      '.pnpm',
+      pnpmEntry,
+      'node_modules',
+      'node-pg-migrate',
+      'bin',
+      'node-pg-migrate.js'
+    );
+    const result = resolveNodePgMigrateBin({
+      repoRoot,
+      exists: (p: string) => p.endsWith(expected),
+      pnpmDirEntries: () => [pnpmEntry, 'node-pg-migrate@8.0.4_pg@8.20.0'],
+    });
+
+    expect(result).toBe(path.join(repoRoot, expected));
+  });
+
+  it('throws a diagnostic error when no candidate exists', () => {
+    expect(() =>
+      resolveNodePgMigrateBin({
+        repoRoot: 'C:\\pulse5',
+        exists: () => false,
+        pnpmDirEntries: () => ['some-other-package@1.0.0'],
+      })
+    ).toThrow(/cannot locate node-pg-migrate CLI/);
+  });
+});
+
+describe('buildNodePgMigrateArgs', () => {
+  it('builds create args without database migration flags leaking into the file name', () => {
+    expect(
+      buildNodePgMigrateArgs({
+        migrateBin: 'node-pg-migrate.js',
+        command: 'create',
+        migrationsDir: 'migrations',
+        extraArgs: ['add-widget-table'],
+      })
+    ).toEqual([
+      'node-pg-migrate.js',
+      'create',
+      'add-widget-table',
+      '--migrations-dir',
+      'migrations',
+      '--migration-file-language',
+      'ts',
+    ]);
+  });
+
+  it('keeps up/down using tsx migration execution', () => {
+    expect(
+      buildNodePgMigrateArgs({
+        migrateBin: 'node-pg-migrate.js',
+        command: 'up',
+        migrationsDir: 'migrations',
+        extraArgs: [],
+      })
+    ).toEqual([
+      'node-pg-migrate.js',
+      'up',
+      '--migrations-dir',
+      'migrations',
+      '--tsx',
+    ]);
+  });
+});
+
+describe('storage package migration scripts', () => {
+  it('routes migrate:create through the shared migration runner', () => {
+    const pkg = JSON.parse(readFileSync('packages/storage/package.json', 'utf8'));
+    expect(pkg.scripts['migrate:create']).toBe(
+      'node ../../scripts/run-migrate.mjs create'
+    );
   });
 });

@@ -335,6 +335,164 @@ end: pull v0.1 data, build a state, generate a shadow signal, label the
 outcome, persist to v0.2 tables. It is intentionally minimal — not a batch
 runner or dashboard.
 
+## 9. v0.2.1 — Shadow Batch Replay
+
+v0.2.1 layers a **batch replay** path on top of the §8 single-market flow.
+Same pure functions, same no-lookahead rule, same outcome-labeling rules —
+just iterated across many resolved markets so we can measure shadow
+*signal density* before deciding whether v0.3 paper simulation is worth
+running seriously.
+
+### 9a. Schema delta
+
+[`migrations/1714000000002_v0.2.1-shadow-batch-replay.ts`](../../migrations/1714000000002_v0.2.1-shadow-batch-replay.ts)
+adds two unique indexes:
+
+| Index                              | Purpose                                                       |
+| ---------------------------------- | ------------------------------------------------------------- |
+| `market_states (market_id, ts)`    | One shadow state per (market, replay timestamp).              |
+| `signals (market_state_id)`        | At most one signal per persisted state.                       |
+
+These make persisted batch replay **idempotent**: re-running the same
+window collapses to a single row each, so a long replay can be safely
+re-run after an interruption. The repos expose `insertIfAbsent` helpers
+that return `{ id, inserted }` so callers can count new vs deduplicated
+writes without a separate SELECT.
+
+v0.2.1 still introduces **no** `orders` / `simulated_orders` / fills /
+positions / execution adapters / wallets / signers / private-key surfaces.
+
+### 9b. Running the batch
+
+[`replay-batch.ts`](./replay-batch.ts) is the entrypoint. Default behaviour
+is DRY-RUN — no rows are written unless `--persist` is passed.
+
+```bash
+pnpm -r build
+
+# Dry-run a week of resolved BTC 5m markets, no DB writes, write the
+# JSON signal-density report to research/reports/.
+npx tsx research/replay/replay-batch.ts \
+    --from=2026-04-20T00:00:00Z \
+    --to=2026-04-27T00:00:00Z \
+    --limit=200 \
+    --step-ms=5000 \
+    --report=research/reports/v0.2.1-density.json
+
+# Persist v0.2 analytical rows (idempotent on the v0.2.1 unique indexes):
+npx tsx research/replay/replay-batch.ts \
+    --from=2026-04-20T00:00:00Z \
+    --to=2026-04-27T00:00:00Z \
+    --persist \
+    --report=research/reports/v0.2.1-density.json
+```
+
+CLI flags:
+
+| Flag         | Default     | Description                                                    |
+| ------------ | ----------- | -------------------------------------------------------------- |
+| `--from=ISO` | required    | Lower bound on `markets.end_time`.                             |
+| `--to=ISO`   | required    | Upper bound on `markets.end_time`.                             |
+| `--limit=N`  | unlimited   | Max markets to process.                                        |
+| `--step-ms=N`| `5000`      | Replay sampling cadence. Validated to `[100, 300_000]`.        |
+| `--dry-run`  | (default)   | No DB writes. Mutually exclusive with `--persist`.             |
+| `--persist`  | off         | Idempotently write `market_states` + `signals`.                |
+| `--report=P` | stdout      | Write JSON report to `P` instead of stdout.                    |
+
+### 9c. Signal-density report shape
+
+```jsonc
+{
+  "generatedAt": "2026-04-27T00:00:00.000Z",
+  "config": { "from": "...", "to": "...", "limit": 200, "stepMs": 5000, "dryRun": true, "persist": false },
+  "markets": {
+    "observed": 200,
+    "replayReady": 187,
+    "skipped": 13,
+    "skipReasons": {
+      "NOT_RESOLVED": 8,
+      "UNKNOWN_FINAL_OUTCOME": 0,
+      "MISSING_TOKEN_IDS": 0,
+      "WINDOW_TOO_SHORT": 5
+    }
+  },
+  "states":  { "built": 11220, "persistedNew": 0, "persistedExisting": 0 },
+  "signals": {
+    "total": 11220,
+    "accepted": 412,
+    "rejected": 10808,
+    "acceptedRate": 0.0367,
+    "decisions":          { "BUY_UP": 240, "BUY_DOWN": 172, "REJECT": 10808 },
+    "rejectionReasons":   { "DATA_INCOMPLETE": ..., "NO_EDGE": ..., "...": ... },
+    "estimatedProbabilityBuckets": {
+      "below_0_50":          { "total": 0,   "accepted": 0,   "labeledAccepted": 0,   "win": 0,  "loss": 0 },
+      "bucket_0_50_to_0_60": { "total": ..., "accepted": ..., "labeledAccepted": ..., "win": ..., "loss": ... },
+      "bucket_0_60_to_0_70": { "total": ..., "accepted": ..., "labeledAccepted": ..., "win": ..., "loss": ... },
+      "bucket_0_70_to_0_80": { "total": ..., "accepted": ..., "labeledAccepted": ..., "win": ..., "loss": ... },
+      "bucket_0_80_and_up":  { "total": ..., "accepted": ..., "labeledAccepted": ..., "win": ..., "loss": ... },
+      "null":                { "total": ..., "accepted": ..., "labeledAccepted": ..., "win": ..., "loss": ... }
+    },
+    "outcomes": { "WIN": ..., "LOSS": ..., "NOT_APPLICABLE": ... }
+  },
+  "notes": [
+    "Bucket 0.70<=p<0.80 has 4 labeled accepted signals (< 30); not yet informative.",
+    "v0.2.1 measures shadow signal density only. Shadow EV is NOT executable EV — do not promote to live trading from this report."
+  ]
+}
+```
+
+Each `estimatedProbabilityBuckets[bucket]` carries five counts:
+
+| Field             | What it counts                                                                       |
+| ----------------- | ------------------------------------------------------------------------------------ |
+| `total`           | All signals (accepted + rejected) whose `estimatedProbability` fell in this bucket.  |
+| `accepted`        | Subset of `total` that the engine accepted (`BUY_UP` / `BUY_DOWN`).                  |
+| `labeledAccepted` | Subset of `accepted` that received a `WIN` or `LOSS` outcome label after resolution. |
+| `win`             | `labeledAccepted` rows whose outcome is `WIN`.                                       |
+| `loss`            | `labeledAccepted` rows whose outcome is `LOSS`.                                      |
+
+The `labeledAccepted` count — not `total` — is the unit the v0.2.1 sample-size
+gate (§9d) checks against `MIN_BUCKET_SAMPLE_FOR_INFORMATIVE = 30`.
+
+### 9d. Sample-size gate
+
+The v0.2.1 acceptance bar is sample-driven, not threshold-driven:
+
+- Before declaring any `p_win` bucket "informative", that bucket must carry
+  **at least 30** labeled accepted signals (the
+  `MIN_BUCKET_SAMPLE_FOR_INFORMATIVE` constant in `replay-batch.ts`).
+- The report emits `notes` warnings when key buckets fall short. v0.3 paper
+  simulation should not be promoted while those warnings are present.
+
+### 9e. Safety reminder
+
+**v0.2.1 is shadow only.** Shadow EV is not executable EV. The report
+cannot approve live trading; that requires v0.3 paper simulation, v0.4
+calibration, and v0.5 risk-engine gating per [`ROADMAP.md`](../../ROADMAP.md).
+
+### 9f. Real-data dry-run result
+
+The branch was dry-run against local `pulse5tester` capture data after
+test-only outcome backfill from Chainlink start/end ticks. The replay window
+was `2026-04-25T08:00:00Z` to `2026-04-26T23:30:00Z`, with `--limit=200` and
+`--step-ms=5000`.
+
+Result:
+
+```text
+markets.observed = 200
+markets.replayReady = 187
+markets.skipped = 13
+states.built = 11033
+signals.total = 11033
+signals.accepted = 0
+signals.acceptedRate = 0
+```
+
+This verifies the replay/reporting pipeline on real captured data. It does
+not justify promotion: all generated signals were rejected, so every key
+probability bucket still has `labeledAccepted = 0`.
+
 ## 7. Pointers to the implementation
 
 - Discovery: [`packages/polymarket-v2/src/discovery-loop.ts`](../../packages/polymarket-v2/src/discovery-loop.ts)
