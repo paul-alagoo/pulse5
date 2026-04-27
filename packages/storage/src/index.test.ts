@@ -5,6 +5,8 @@ import {
   createRawEventsRepository,
   createBookSnapshotsRepository,
   createBtcTicksRepository,
+  createMarketStatesRepository,
+  createSignalsRepository,
   loadPgConfig,
   buildPoolConfigFromFile,
 } from './index.js';
@@ -19,6 +21,8 @@ describe('storage package public surface', () => {
     expect(typeof createRawEventsRepository).toBe('function');
     expect(typeof createBookSnapshotsRepository).toBe('function');
     expect(typeof createBtcTicksRepository).toBe('function');
+    expect(typeof createMarketStatesRepository).toBe('function');
+    expect(typeof createSignalsRepository).toBe('function');
   });
 
   it('exposes config helpers', () => {

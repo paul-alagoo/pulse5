@@ -1,6 +1,6 @@
 // Pulse5 collector entrypoint.
 
-export const COLLECTOR_VERSION = '0.1.1';
+export const COLLECTOR_VERSION = '0.2.0';
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,6 +41,33 @@ export function validatePositiveIntervalMs(
   const n = typeof raw === 'number' ? raw : Number(raw);
   if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return fallback;
   return n;
+}
+
+/**
+ * v0.2 Shadow Signal Engine env flag — MARKER ONLY in this PR.
+ *
+ * The flag is OFF by default. When set to a truthy value, the collector
+ * logs a single observation marker line and nothing else. Live periodic
+ * `market_states` / `signals` emission from the collector is intentionally
+ * NOT implemented in this PR — it is deferred to a follow-up PR on this
+ * branch. The replay path
+ * (`research/replay/replay-market.ts`) is the only consumer of the v0.2
+ * persistence surface in this PR and exercises the same pure
+ * `@pulse5/strategy` code path that any future live emitter would.
+ *
+ * Disabled / unset / "0" / "false" / empty / "no" → bit-for-bit v0.1
+ * collector behaviour.
+ *
+ * v0.2 is shadow-only end-to-end; this flag never enables trading, paper
+ * trading, order placement, wallets, signers, or any execution surface.
+ */
+export function isShadowSignalsEnabled(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed === '' || trimmed === '0' || trimmed === 'false' || trimmed === 'no') {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -109,6 +136,31 @@ export async function runCollector(options: RunOptions = {}): Promise<void> {
       process.env['HEALTH_LOG_INTERVAL_MS'],
       POSITIVE_INT_FAILSAFE.health
     );
+
+  // v0.2 shadow signal engine wiring: MARKER ONLY in this PR. OFF by
+  // default. When the env flag is set the collector logs a single
+  // observation marker; it does NOT build MarketState rows, generate
+  // Signal rows, or invoke @pulse5/strategy. Live periodic shadow signal
+  // emission from the collector is deferred to a follow-up PR on this
+  // branch — the replay path (research/replay/replay-market.ts) is the
+  // only consumer of the v0.2 persistence surface in this PR. Gating the
+  // flag here keeps v0.1 collector behaviour bit-for-bit unchanged when
+  // unset, and guarantees no trading / paper trading / order / wallet /
+  // signer surface is ever introduced by toggling it.
+  const shadowSignalsEnabled = isShadowSignalsEnabled(process.env['PULSE5_ENABLE_SHADOW_SIGNALS']);
+  if (shadowSignalsEnabled) {
+    logger.info(
+      {
+        component: 'collector.v0_2',
+        shadowSignalsEnabled: true,
+        emission: 'deferred-to-followup-pr',
+        trading: false,
+        wallet: false,
+        signer: false,
+      },
+      'v0.2 shadow signal engine flag observed (marker only; no live market_states/signals emission in this PR; no orders, no wallet, no signer)'
+    );
+  }
 
   const collector = createCollector(
     { repos, logger },

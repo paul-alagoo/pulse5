@@ -354,9 +354,88 @@ It is **not** required to make money, predict outcomes, or place any order in v0
 
 ---
 
+## 11.5. v0.2 — Shadow Signal Engine
+
+v0.2 is **shadow only**: it observes the v0.1 capture stream, rebuilds
+market state, scores it, and labels outcomes after settlement. v0.2 still
+does not trade, does not place orders, does not simulate orders, does not
+hold a wallet, and does not handle private keys / signers — see
+[`research/replay/README.md`](research/replay/README.md#8-v02-shadow-signal-engine--replay-flow)
+for the full replay flow.
+
+### What v0.2 adds in this PR
+
+- Two analytical tables — `market_states` (per-tick numeric snapshot) and
+  `signals` (engine decision + features + post-resolution outcome label) —
+  introduced by [`migrations/1714000000001_v0.2-shadow-signal-engine.ts`](migrations/1714000000001_v0.2-shadow-signal-engine.ts).
+- A new pure-logic package — [`packages/strategy`](packages/strategy) —
+  exposing `buildMarketState`, `generateSignal`, and
+  `labelSignalOutcome`. No DB, no fetch, no clock — replay-ready by
+  construction.
+- A replay-only consumer — [`research/replay/replay-market.ts`](research/replay/replay-market.ts) —
+  that walks one resolved market end-to-end through the same
+  `@pulse5/strategy` code path any future live emitter would use, and
+  persists the resulting state + signal rows.
+- A **marker-only** env-flag toggle on the collector (default OFF):
+
+      PULSE5_ENABLE_SHADOW_SIGNALS=1
+
+  When set, the collector emits a single observation log line and nothing
+  else. It does **not** build `MarketState` rows, generate `Signal` rows,
+  or invoke `@pulse5/strategy`. When unset / `0` / `false`, the collector
+  behaves bit-for-bit like v0.1.
+
+### Deferred to a follow-up PR
+
+- Live periodic `market_states` / `signals` emission from the collector
+  (the actual per-tick scoring loop). The flag in this PR is intentionally
+  marker-only so the v0.2 schema, pure logic, and replay path can land
+  and be reviewed without also reviewing a live emitter. The follow-up PR
+  will reuse the same `@pulse5/strategy` functions the replay path
+  already exercises.
+
+### `price_to_beat` fallback
+
+`markets.price_to_beat` is not always populated by v0.1's discovery (the
+gamma-api response sometimes omits it). The state builder applies an
+explicit fallback:
+
+1. Prefer `market.priceToBeat` when present.
+2. Otherwise, derive from the **Chainlink BTC tick nearest
+   `market.startTime`** within `priceToBeatToleranceMs` (default 10 s).
+3. If neither yields a usable value, `data_complete = false` and the
+   engine rejects with `PRICE_TO_BEAT_MISSING`.
+
+This is documented as a **v0.2 fallback for shadow scoring**, not a tuned
+trading assumption.
+
+### `outcome` vs. `final_outcome`
+
+The `signals` table records two separate fields:
+
+| Column           | What it is                                                  |
+| ---------------- | ----------------------------------------------------------- |
+| `final_outcome`  | Normalized market settlement snapshot (`UP` \| `DOWN`).     |
+| `outcome`        | Signal scoring result (`WIN` \| `LOSS` \| `NOT_APPLICABLE`).|
+
+- Accepted `BUY_UP` wins iff `final_outcome = UP`.
+- Accepted `BUY_DOWN` wins iff `final_outcome = DOWN`.
+- Rejected signals always get `NOT_APPLICABLE` after labeling.
+
+### Replay no-lookahead rule
+
+Replay must construct each `MarketState` using **only data visible at the
+target timestamp `t`** — no `book_snapshots` or `btc_ticks` row whose
+`receive_ts > t` may be used. The state builder and signal engine never
+read `markets.final_outcome` / `markets.status`; only the outcome labeler
+does, and only after the underlying market has resolved. See the SQL
+recipes in [`research/replay/README.md`](research/replay/README.md).
+
+---
+
 ## 12. Future roadmap (one-liners)
 
-- **v0.2 — Shadow Signal Engine:** 100–250 ms `market_states` + rule-based `signals` with full feature snapshots and outcome labels.
+- **v0.2 — Shadow Signal Engine:** *delivered* — see §11.5 above.
 - **v0.3 — Paper Execution Simulator:** realistic limit-order simulation (spread, depth, latency, cancels, 5-share minimum).
 - **v0.4 — Calibration:** win-rate buckets, EV reports, slippage, distance/time heatmaps. Hard gate: `p_win ≥ 0.80` signals must realize ≥0.80 actual win rate with positive net EV.
 - **v0.5 — Canary Live:** very small live trades only after v0.4 passes. Strict kill switches (see [PULSE5_START.md §7](PULSE5_START.md)).
@@ -366,6 +445,16 @@ It is **not** required to make money, predict outcomes, or place any order in v0
 ## 13. Safety statement
 
 Pulse5 v0.1 **does not trade, does not place orders, and does not require a wallet.** Every deviation that could affect that guarantee must be called out in a PR description and require explicit approval before merging.
+
+Pulse5 v0.2 keeps the same boundary: even with `PULSE5_ENABLE_SHADOW_SIGNALS=1`,
+the collector does **not** trade, paper-trade, simulate orders, place
+orders (live or paper), connect a wallet, hold a private key, or invoke a
+signer. In this PR the flag is marker-only — the collector does not
+emit `market_states` / `signals` rows at runtime. The replay path
+([`research/replay/replay-market.ts`](research/replay/replay-market.ts))
+is the only writer of those analytical tables in this PR, and it too
+remains read/write at the database boundary only — never at any
+trading / wallet / signer surface.
 
 ---
 
