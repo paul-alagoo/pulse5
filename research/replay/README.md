@@ -14,8 +14,14 @@ reconstruct every market it observed:
 | `book_snapshots`  | Normalized top-of-book per token over time, keyed by `(ts, market_id, token_id)`. |
 | `btc_ticks`       | Normalized BTC price ticks from RTDS Binance + Chainlink, keyed by `(ts, source, symbol)`. |
 
-v0.2 adds two analytical tables on top — `market_states` and `signals` —
-populated by the same pure logic the live collector uses (see §8 below).
+v0.2 adds two analytical tables on top — `market_states` and `signals`.
+**In this PR**, those tables are populated only by the replay path
+([`replay-market.ts`](./replay-market.ts)). The live collector does **not**
+build state or emit signals at runtime — it exposes a marker-only
+`PULSE5_ENABLE_SHADOW_SIGNALS=1` flag (see §8 below). A follow-up PR
+will add a live emitter that reuses the exact same pure strategy
+functions exercised here, so there will still be no separate
+replay-only engine when it lands.
 
 The collector is **strictly read-only at the boundary**: it does not place
 orders, sign transactions, or hold a wallet. Replay therefore only ever

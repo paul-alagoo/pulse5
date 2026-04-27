@@ -1,0 +1,17 @@
+# Force LF for source files so Windows checkouts (core.autocrlf=true) do not
+# rewrite line endings on disk. CRLF in `.mjs` scripts that start with a
+# `#!/usr/bin/env node` shebang breaks vitest's import transform with
+# "SyntaxError: Invalid or unexpected token" — keeping these files LF on
+# every platform avoids that class of failure entirely.
+*.mjs        text eol=lf
+*.cjs        text eol=lf
+*.js         text eol=lf
+*.ts         text eol=lf
+*.tsx        text eol=lf
+*.json       text eol=lf
+*.md         text eol=lf
+*.yml        text eol=lf
+*.yaml       text eol=lf
+*.sql        text eol=lf
+*.sh         text eol=lf
+.env*        text eol=lf

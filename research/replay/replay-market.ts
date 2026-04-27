@@ -1,7 +1,7 @@
 // Pulse5 v0.2 — minimal replay example.
 //
 // Walks ONE resolved BTC 5-minute Up/Down market end-to-end, using the
-// same pure logic the live collector uses:
+// same pure logic intended for both replay and future live emission:
 //
 //   1. Load market metadata + the slices of book_snapshots / btc_ticks
 //      visible at a target timestamp.
