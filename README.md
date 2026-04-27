@@ -394,6 +394,80 @@ for the full replay flow.
   will reuse the same `@pulse5/strategy` functions the replay path
   already exercises.
 
+### v0.2.1 — Shadow Batch Replay (this PR)
+
+v0.2.1 layers a **batch replay** path on top of the v0.2 single-market
+replay so we can measure shadow-signal density before deciding whether v0.3
+paper simulation is worth pursuing seriously. Same safety contract: no
+trading, no paper trading, no orders, no wallet, no signer, no private-key
+handling.
+
+What v0.2.1 adds:
+
+- `research/replay/replay-batch.ts` — multi-market replay over a configurable
+  date range. Reuses the exact same `buildMarketState` / `generateSignal` /
+  `labelSignalOutcome` pure functions from `@pulse5/strategy` that
+  `replay-market.ts` and any future live emitter will use.
+- A small migration ([`migrations/1714000000002_v0.2.1-shadow-batch-replay.ts`](migrations/1714000000002_v0.2.1-shadow-batch-replay.ts))
+  adding two unique indexes:
+  - `market_states (market_id, ts)` — one shadow state per (market, replay timestamp).
+  - `signals (market_state_id)` — at most one signal per persisted state.
+  These make persisted batch replay idempotent: re-running the same window
+  collapses to a single row instead of stacking duplicates.
+- Idempotent repo helpers — `MarketStatesRepository.insertIfAbsent` and
+  `SignalsRepository.insertIfAbsent` — that the batch replay uses on
+  `--persist` runs.
+- A JSON **signal-density report** with markets observed / replay-ready /
+  skipped (with reasons), states built / persisted, total / accepted /
+  rejected signal counts, decision and rejection-reason distributions, and
+  per-bucket counters for the estimated-probability buckets (`0.50≤p<0.60`,
+  `0.60≤p<0.70`, `0.70≤p<0.80`, `p≥0.80`, plus a sub-0.50 / `null`-prob
+  bucket). Each bucket reports **total**, **accepted**, **labeledAccepted**
+  (the calibration unit), and **win** / **loss** counts, alongside the
+  global WIN / LOSS / NOT_APPLICABLE outcome totals. Notes warn when any
+  key bucket carries < 30 *labeled accepted* signals.
+- A bright reminder in the report itself that **shadow EV is not executable
+  EV**. v0.2.1 cannot approve live trading.
+
+Default behaviour is **DRY-RUN** — no rows are written unless you pass
+`--persist`. The replay obeys the same v0.2 no-lookahead rule (every input
+filtered by `receive_ts <= targetTimestamp`; the engine never reads
+`markets.final_outcome` / `markets.status`; only the labeler does, after
+the signal has already been generated).
+
+```bash
+# Dry-run a week of resolved BTC 5m markets, no DB writes:
+npx tsx research/replay/replay-batch.ts \
+    --from=2026-04-20T00:00:00Z \
+    --to=2026-04-27T00:00:00Z \
+    --limit=200 \
+    --step-ms=5000 \
+    --report=research/reports/v0.2.1-density.json
+
+# Persist v0.2 analytical rows (idempotent on the v0.2.1 unique indexes):
+npx tsx research/replay/replay-batch.ts \
+    --from=2026-04-20T00:00:00Z \
+    --to=2026-04-27T00:00:00Z \
+    --persist \
+    --report=research/reports/v0.2.1-density.json
+```
+
+See [`research/replay/README.md`](research/replay/README.md) for the full
+flow, the SQL queries the runner issues, and the buckets / sample-size gate.
+
+Real-data dry-run result for this branch:
+
+- Source: local `pulse5tester` capture database with test-only outcome backfill
+  from Chainlink start/end ticks.
+- Window: `2026-04-25T08:00:00Z` to `2026-04-26T23:30:00Z`, `limit=200`,
+  `step-ms=5000`, dry-run only.
+- Result: 200 observed markets, 187 replay-ready, 11,033 states built,
+  11,033 signals generated, 0 accepted signals.
+- Interpretation: v0.2.1 batch replay and density reporting are functional
+  on real captured data, but the current v0.2 shadow engine has zero accepted
+  signal density in this window. Do not promote to paper/live execution from
+  this report.
+
 ### `price_to_beat` fallback
 
 `markets.price_to_beat` is not always populated by v0.1's discovery (the
@@ -436,6 +510,9 @@ recipes in [`research/replay/README.md`](research/replay/README.md).
 ## 12. Future roadmap (one-liners)
 
 - **v0.2 — Shadow Signal Engine:** *delivered* — see §11.5 above.
+- **v0.2.1 — Shadow Batch Replay:** *delivered* — see §11.5 above. Measures
+  signal density, accepted-signal rate, and `p_win` bucket coverage. Cannot
+  approve live trading.
 - **v0.3 — Paper Execution Simulator:** realistic limit-order simulation (spread, depth, latency, cancels, 5-share minimum).
 - **v0.4 — Calibration:** win-rate buckets, EV reports, slippage, distance/time heatmaps. Hard gate: `p_win ≥ 0.80` signals must realize ≥0.80 actual win rate with positive net EV.
 - **v0.5 — Canary Live:** very small live trades only after v0.4 passes. Strict kill switches (see [PULSE5_START.md §7](PULSE5_START.md)).
@@ -455,6 +532,14 @@ emit `market_states` / `signals` rows at runtime. The replay path
 is the only writer of those analytical tables in this PR, and it too
 remains read/write at the database boundary only — never at any
 trading / wallet / signer surface.
+
+Pulse5 v0.2.1 keeps the same boundary again. The batch replay path
+([`research/replay/replay-batch.ts`](research/replay/replay-batch.ts)) is
+the only additional writer of `market_states` / `signals` introduced in
+this PR. There are still **no** `orders`, `simulated_orders`, fills,
+positions, execution adapters, wallets, signers, or private-key handling
+anywhere in the codebase. v0.2.1 measures shadow signal density only and
+**cannot** approve live trading.
 
 ---
 

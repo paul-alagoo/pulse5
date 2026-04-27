@@ -25,7 +25,7 @@
 //   - We do not modify `process.env` of the parent process.
 
 import { spawn } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
@@ -37,6 +37,55 @@ const MIGRATIONS_DIR = path.join(REPO_ROOT, 'migrations');
 
 const DEFAULT_JSON_PATH =
   process.platform === 'win32' ? 'C:\\postgres.json' : '/etc/pulse5/postgres.json';
+
+/**
+ * Locate the node-pg-migrate CLI across both hoisted/symlinked node_modules
+ * and pnpm's virtual-store layout. In this workspace, node-pg-migrate is a
+ * dependency of @pulse5/storage, so pnpm does not necessarily expose
+ * `node_modules/node-pg-migrate` at the repo root.
+ */
+export function resolveNodePgMigrateBin({
+  repoRoot = REPO_ROOT,
+  exists = existsSync,
+  pnpmDirEntries = (dir) => readdirSync(dir),
+} = {}) {
+  const rootCandidate = path.join(
+    repoRoot,
+    'node_modules',
+    'node-pg-migrate',
+    'bin',
+    'node-pg-migrate.js'
+  );
+  if (exists(rootCandidate)) return rootCandidate;
+
+  const pnpmStore = path.join(repoRoot, 'node_modules', '.pnpm');
+  let entries;
+  try {
+    entries = pnpmDirEntries(pnpmStore);
+  } catch {
+    entries = [];
+  }
+
+  for (const entry of entries) {
+    const name = typeof entry === 'string' ? entry : entry?.name;
+    if (typeof name !== 'string' || !name.startsWith('node-pg-migrate@')) {
+      continue;
+    }
+    const candidate = path.join(
+      pnpmStore,
+      name,
+      'node_modules',
+      'node-pg-migrate',
+      'bin',
+      'node-pg-migrate.js'
+    );
+    if (exists(candidate)) return candidate;
+  }
+
+  throw new Error(
+    'cannot locate node-pg-migrate CLI; run `pnpm install` and verify @pulse5/storage dependencies'
+  );
+}
 
 /** Strip the password from a postgres URL for log-safe printing. */
 export function redactDsn(dsn) {
@@ -170,20 +219,58 @@ function readJsonFile(p) {
   return readFileSync(p, 'utf8');
 }
 
-function pickDirection(argv) {
-  // The package.json invokes us with the migration direction as argv[0].
+function pickCommand(argv) {
+  // The package.json invokes us with the migration command as argv[0].
   // Fail closed if it is missing — we don't want to default to "up" silently.
-  const direction = argv[0];
-  if (direction !== 'up' && direction !== 'down') {
+  const command = argv[0];
+  if (command !== 'up' && command !== 'down' && command !== 'create') {
     throw new Error(
-      `run-migrate: missing or invalid direction; expected "up" or "down", got "${direction ?? '<none>'}"`
+      `run-migrate: missing or invalid command; expected "up", "down", or "create", got "${command ?? '<none>'}"`
     );
   }
-  return direction;
+  return command;
+}
+
+export function buildNodePgMigrateArgs({
+  migrateBin,
+  command,
+  migrationsDir,
+  extraArgs = [],
+}) {
+  const base = [migrateBin, command, ...extraArgs, '--migrations-dir', migrationsDir];
+  if (command === 'create') {
+    return [...base, '--migration-file-language', 'ts'];
+  }
+  return [...base, '--tsx'];
 }
 
 async function main() {
-  const direction = pickDirection(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  const command = pickCommand(argv);
+  const extraArgs = argv.slice(1);
+  const migrateBin = resolveNodePgMigrateBin({ repoRoot: REPO_ROOT });
+
+  if (command === 'create') {
+    const args = buildNodePgMigrateArgs({
+      migrateBin,
+      command,
+      migrationsDir: MIGRATIONS_DIR,
+      extraArgs,
+    });
+    const child = spawn(process.execPath, args, {
+      cwd: REPO_ROOT,
+      env: process.env,
+      stdio: 'inherit',
+    });
+    child.on('exit', (code) => {
+      process.exit(code ?? 0);
+    });
+    child.on('error', (err) => {
+      process.stderr.write(`[db:migrate] node-pg-migrate failed to start: ${err.message}\n`);
+      process.exit(21);
+    });
+    return;
+  }
 
   const envFileContent = loadEnvFile(ENV_PATH);
   let resolved;
@@ -204,24 +291,12 @@ async function main() {
       ` (${resolved.redacted})\n`
   );
 
-  // Locate the node-pg-migrate CLI without resolving from cwd, so the script
-  // works regardless of which workspace package the parent script invokes
-  // it from.
-  const migrateBin = path.join(
-    REPO_ROOT,
-    'node_modules',
-    'node-pg-migrate',
-    'bin',
-    'node-pg-migrate.js'
-  );
-
-  const args = [
+  const args = buildNodePgMigrateArgs({
     migrateBin,
-    direction,
-    '--migrations-dir',
-    MIGRATIONS_DIR,
-    '--tsx',
-  ];
+    command,
+    migrationsDir: MIGRATIONS_DIR,
+    extraArgs,
+  });
 
   // Pass DATABASE_URL via the child env ONLY — it never lands on disk and
   // is not visible in the parent shell's environment.

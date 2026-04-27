@@ -162,6 +162,47 @@ describe('market_states repository', () => {
     const repo = createMarketStatesRepository(db);
     expect(await repo.countByMarket('mkt-x')).toBe(0);
   });
+
+  // v0.2.1 idempotent persisted replay tests --------------------------------
+  // The `(market_id, ts)` unique index lets repeated batch runs collapse to a
+  // single row instead of stacking duplicates. The repo is the seam where
+  // that idempotency is observed: a fresh insert returns inserted=true with
+  // the new id, a conflict returns inserted=false with the existing id.
+
+  it('insertIfAbsent returns inserted=true on a fresh row', async () => {
+    const db = fakeDb([
+      { match: /INSERT INTO market_states[\s\S]*ON CONFLICT/, rows: [{ id: '202' }] },
+    ]);
+    const repo = createMarketStatesRepository(db);
+    const result = await repo.insertIfAbsent(fixtureState());
+    expect(result).toEqual({ id: 202n, inserted: true });
+    // INSERT path only — no fallback SELECT issued.
+    expect(db.calls).toHaveLength(1);
+    expect(db.calls[0]!.text).toContain('ON CONFLICT (market_id, ts) DO NOTHING');
+  });
+
+  it('insertIfAbsent falls back to SELECT and returns inserted=false on conflict', async () => {
+    const db = fakeDb([
+      { match: /INSERT INTO market_states[\s\S]*ON CONFLICT/, rows: [] },
+      { match: /SELECT id FROM market_states/, rows: [{ id: '101' }] },
+    ]);
+    const repo = createMarketStatesRepository(db);
+    const result = await repo.insertIfAbsent(fixtureState());
+    expect(result).toEqual({ id: 101n, inserted: false });
+    expect(db.calls).toHaveLength(2);
+    expect(db.calls[1]!.params).toEqual(['mkt-1', FIXED_TS]);
+  });
+
+  it('insertIfAbsent throws when ON CONFLICT hit but no existing row found (defensive)', async () => {
+    const db = fakeDb([
+      { match: /INSERT INTO market_states[\s\S]*ON CONFLICT/, rows: [] },
+      { match: /SELECT id FROM market_states/, rows: [] },
+    ]);
+    const repo = createMarketStatesRepository(db);
+    await expect(repo.insertIfAbsent(fixtureState())).rejects.toThrow(
+      /conflict reported but no existing row found/
+    );
+  });
 });
 
 describe('signals repository', () => {
@@ -391,5 +432,49 @@ describe('signals repository', () => {
     const db = fakeDb([{ match: /COUNT/, rows: [] }]);
     const repo = createSignalsRepository(db);
     expect(await repo.countByMarket('mkt-x')).toBe(0);
+  });
+
+  // v0.2.1 idempotent persisted replay tests --------------------------------
+  // The `(market_state_id)` unique index enforces "at most one signal per
+  // persisted state". Repeated batch runs collapse to a single signal row.
+
+  it('insertIfAbsent returns inserted=true on a fresh row', async () => {
+    const db = fakeDb([
+      { match: /INSERT INTO signals[\s\S]*ON CONFLICT/, rows: [{ id: '777' }] },
+    ]);
+    const repo = createSignalsRepository(db);
+    const result = await repo.insertIfAbsent(fixtureSignal());
+    expect(result).toEqual({ id: 777n, inserted: true });
+    expect(db.calls[0]!.text).toContain('ON CONFLICT (market_state_id) DO NOTHING');
+  });
+
+  it('insertIfAbsent falls back to SELECT on conflict', async () => {
+    const db = fakeDb([
+      { match: /INSERT INTO signals[\s\S]*ON CONFLICT/, rows: [] },
+      { match: /SELECT id FROM signals/, rows: [{ id: '7' }] },
+    ]);
+    const repo = createSignalsRepository(db);
+    const result = await repo.insertIfAbsent(fixtureSignal());
+    expect(result).toEqual({ id: 7n, inserted: false });
+    expect(db.calls[1]!.params).toEqual(['7']);
+  });
+
+  it('insertIfAbsent throws when marketStateId is null', async () => {
+    const db = fakeDb();
+    const repo = createSignalsRepository(db);
+    await expect(
+      repo.insertIfAbsent(fixtureSignal({ marketStateId: null }))
+    ).rejects.toThrow(/marketStateId/);
+  });
+
+  it('insertIfAbsent throws when ON CONFLICT hit but no existing row found (defensive)', async () => {
+    const db = fakeDb([
+      { match: /INSERT INTO signals[\s\S]*ON CONFLICT/, rows: [] },
+      { match: /SELECT id FROM signals/, rows: [] },
+    ]);
+    const repo = createSignalsRepository(db);
+    await expect(repo.insertIfAbsent(fixtureSignal())).rejects.toThrow(
+      /conflict reported but no existing row found/
+    );
   });
 });

@@ -23,6 +23,9 @@ pnpm-debug.log*
 coverage/
 .nyc_output/
 
+# Local replay reports
+research/reports/*.json
+
 # Caches
 .turbo/
 .cache/

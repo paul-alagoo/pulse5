@@ -18,6 +18,15 @@ import type { Db } from './client.js';
  */
 export interface SignalsRepository {
   insert(signal: Signal): Promise<bigint>;
+  /**
+   * v0.2.1 idempotent insert. Returns the existing id when a row already
+   * exists for `market_state_id` (the unique constraint added in
+   * `migrations/1714000000002_v0.2.1-shadow-batch-replay.ts`), otherwise
+   * inserts and returns the new id. Pure-function shadow scoring is
+   * deterministic in the state, so a re-run for the same persisted state
+   * row would always be a duplicate of the existing signal.
+   */
+  insertIfAbsent(signal: Signal): Promise<{ id: bigint; inserted: boolean }>;
   findById(id: bigint): Promise<Signal | null>;
   /**
    * Stamps a signal with its post-resolution scoring. `finalOutcome` is the
@@ -198,6 +207,62 @@ export function createSignalsRepository(db: Db): SignalsRepository {
         throw new Error('signals insert returned no id');
       }
       return BigInt(idStr);
+    },
+
+    async insertIfAbsent(
+      signal: Signal
+    ): Promise<{ id: bigint; inserted: boolean }> {
+      if (signal.marketStateId === null) {
+        throw new Error('signals.insertIfAbsent requires a marketStateId');
+      }
+      const insert = await db.query<IdRow>(
+        `INSERT INTO signals (
+           ts, market_id, market_state_id,
+           decision, side, price,
+           estimated_probability, estimated_ev,
+           accepted, rejection_reasons, features,
+           outcome, final_outcome, resolved_at
+         ) VALUES (
+           $1, $2, $3,
+           $4, $5, $6,
+           $7, $8,
+           $9, $10::jsonb, $11::jsonb,
+           $12, $13, $14
+         )
+         ON CONFLICT (market_state_id) DO NOTHING
+         RETURNING id`,
+        [
+          signal.ts,
+          signal.marketId,
+          signal.marketStateId.toString(),
+          signal.decision,
+          signal.side,
+          signal.price,
+          signal.estimatedProbability,
+          signal.estimatedEv,
+          signal.accepted,
+          JSON.stringify(signal.rejectionReasons),
+          JSON.stringify(signal.features),
+          signal.outcome,
+          signal.finalOutcome,
+          signal.resolvedAt,
+        ]
+      );
+      const insertedId = insert.rows[0]?.id;
+      if (insertedId) {
+        return { id: BigInt(insertedId), inserted: true };
+      }
+      const existing = await db.query<IdRow>(
+        `SELECT id FROM signals WHERE market_state_id = $1`,
+        [signal.marketStateId.toString()]
+      );
+      const existingId = existing.rows[0]?.id;
+      if (!existingId) {
+        throw new Error(
+          'signals insertIfAbsent: conflict reported but no existing row found'
+        );
+      }
+      return { id: BigInt(existingId), inserted: false };
     },
 
     async findById(id: bigint): Promise<Signal | null> {
