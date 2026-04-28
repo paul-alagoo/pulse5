@@ -259,6 +259,35 @@ describe('generateSignalV022 — frozen estimator behavior', () => {
     expect(polluted.side).toBe(honest.side);
   });
 
+  it('drops ticks whose source does not match state.btcSource', () => {
+    // Mix in ticks from rtds.binance even though state.btcSource is
+    // rtds.chainlink. The estimator must ignore the binance ticks; if
+    // it does not, the wildly different prices below would visibly
+    // change pUp.
+    const honestTicks = tickHistory(67_000, 67_500);
+    const binanceTick: BtcTick = {
+      ts: new Date(T.getTime() - 30_000),
+      receiveTs: new Date(T.getTime() - 30_000),
+      source: 'rtds.binance',
+      symbol: 'BTC',
+      price: 100_000,
+      latencyMs: null,
+      rawEventId: null,
+    };
+    const honest = generateSignalV022(
+      { state: fixtureState(), recentBtcTicks: honestTicks },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    const mixed = generateSignalV022(
+      {
+        state: fixtureState(),
+        recentBtcTicks: [...honestTicks, binanceTick],
+      },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(mixed.estimatedProbability).toBe(honest.estimatedProbability);
+  });
+
   it('selects side as argmax(upEv, downEv) — EV-based side selection', () => {
     // Scenario A: pUp ≈ 0.5 region, but downBestAsk = 0.30 makes downEv
     // = 0.5 - 0.3 = 0.2; upBestAsk = 0.55 makes upEv = 0.5 - 0.55 =
@@ -292,5 +321,207 @@ describe('generateSignalV022 — frozen estimator behavior', () => {
     if (sig.estimatedEv !== null) {
       expect(sig.estimatedEv).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('generateSignalV022 — fail-closed and rejection paths', () => {
+  const ticks = tickHistory(67_000, 67_500);
+
+  it('REJECTs DATA_INCOMPLETE when state.dataComplete=false', () => {
+    const sig = generateSignalV022(
+      { state: fixtureState({ dataComplete: false }), recentBtcTicks: ticks },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(sig.decision).toBe('REJECT');
+    expect(sig.rejectionReasons).toContain('DATA_INCOMPLETE');
+  });
+
+  it('REJECTs PRICE_TO_BEAT_MISSING when priceToBeat=null', () => {
+    const sig = generateSignalV022(
+      {
+        state: fixtureState({
+          priceToBeat: null,
+          distance: null,
+          distanceBps: null,
+          dataComplete: false,
+        }),
+        recentBtcTicks: ticks,
+      },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(sig.decision).toBe('REJECT');
+    expect(sig.rejectionReasons).toContain('PRICE_TO_BEAT_MISSING');
+  });
+
+  it('REJECTs STALE_BTC_TICK when btcTickAgeMs exceeds config', () => {
+    const sig = generateSignalV022(
+      {
+        state: fixtureState({
+          btcTickAgeMs: DEFAULT_STRATEGY_CONFIG.maxBtcTickAgeMs + 1,
+          stale: true,
+        }),
+        recentBtcTicks: ticks,
+      },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(sig.rejectionReasons).toContain('STALE_BTC_TICK');
+  });
+
+  it('REJECTs STALE_UP_BOOK / STALE_DOWN_BOOK when book ages exceed config', () => {
+    const sig = generateSignalV022(
+      {
+        state: fixtureState({
+          upBookAgeMs: DEFAULT_STRATEGY_CONFIG.maxBookAgeMs + 1,
+          downBookAgeMs: DEFAULT_STRATEGY_CONFIG.maxBookAgeMs + 1,
+        }),
+        recentBtcTicks: ticks,
+      },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(sig.rejectionReasons).toContain('STALE_UP_BOOK');
+    expect(sig.rejectionReasons).toContain('STALE_DOWN_BOOK');
+  });
+
+  it('REJECTs TIME_REMAINING_TOO_LOW / TIME_REMAINING_TOO_HIGH', () => {
+    const low = generateSignalV022(
+      {
+        state: fixtureState({
+          timeRemainingMs: DEFAULT_STRATEGY_CONFIG.minTimeRemainingMs - 1,
+        }),
+        recentBtcTicks: ticks,
+      },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(low.rejectionReasons).toContain('TIME_REMAINING_TOO_LOW');
+
+    const high = generateSignalV022(
+      {
+        state: fixtureState({
+          timeRemainingMs: DEFAULT_STRATEGY_CONFIG.maxTimeRemainingMs + 1,
+        }),
+        recentBtcTicks: ticks,
+      },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(high.rejectionReasons).toContain('TIME_REMAINING_TOO_HIGH');
+  });
+
+  it('REJECTs BTC_FEED_GAP_TOO_LARGE when chainlinkBinanceGapBps exceeds config', () => {
+    const sig = generateSignalV022(
+      {
+        state: fixtureState({
+          chainlinkBinanceGapBps: DEFAULT_STRATEGY_CONFIG.maxChainlinkBinanceGapBps + 1,
+        }),
+        recentBtcTicks: ticks,
+      },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(sig.rejectionReasons).toContain('BTC_FEED_GAP_TOO_LARGE');
+  });
+
+  it('REJECTs SPREAD_TOO_WIDE on the selected side only', () => {
+    // Up side selected (positive distance) — wide upSpread → reject.
+    const upWide = generateSignalV022(
+      {
+        state: fixtureState({
+          upSpread: DEFAULT_STRATEGY_CONFIG.maxSpread + 0.01,
+        }),
+        recentBtcTicks: ticks,
+      },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(upWide.rejectionReasons).toContain('SPREAD_TOO_WIDE');
+
+    // Down side selected (negative distance) — wide downSpread → reject.
+    const downWide = generateSignalV022(
+      {
+        state: fixtureState({
+          btcPrice: 66_500,
+          distance: -500,
+          distanceBps: -(500 / 67_000) * 10_000,
+          downSpread: DEFAULT_STRATEGY_CONFIG.maxSpread + 0.01,
+        }),
+        recentBtcTicks: tickHistory(67_500, 66_500),
+      },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(downWide.rejectionReasons).toContain('SPREAD_TOO_WIDE');
+  });
+
+  it('REJECTs ENTRY_PRICE_TOO_EXPENSIVE on the selected side', () => {
+    const sig = generateSignalV022(
+      {
+        state: fixtureState({
+          upBestAsk: DEFAULT_STRATEGY_CONFIG.maxEntryPrice + 0.01,
+        }),
+        recentBtcTicks: ticks,
+      },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(sig.rejectionReasons).toContain('ENTRY_PRICE_TOO_EXPENSIVE');
+  });
+
+  it('REJECTs NO_EDGE when selected EV is below v0.2.2 minEstimatedEv', () => {
+    // Both asks high enough that no side has positive EV.
+    const sig = generateSignalV022(
+      {
+        state: fixtureState({
+          btcPrice: 67_005,
+          distance: 5,
+          distanceBps: (5 / 67_000) * 10_000,
+          upBestAsk: 0.7,
+          downBestAsk: 0.7,
+          upBestBid: 0.65,
+          downBestBid: 0.65,
+        }),
+        recentBtcTicks: ticks,
+      },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(sig.rejectionReasons).toContain('NO_EDGE');
+  });
+
+  it('REJECTs DATA_INCOMPLETE when fewer than MIN_TICKS_FOR_VOLATILITY visible ticks', () => {
+    const sig = generateSignalV022(
+      {
+        state: fixtureState(),
+        recentBtcTicks: [tickAt(-30_000, 67_000), tickAt(0, 67_500)],
+      },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(sig.decision).toBe('REJECT');
+    expect(sig.rejectionReasons).toContain('DATA_INCOMPLETE');
+    expect(sig.estimatedProbability).toBeNull();
+    expect(sig.features.recentMomentumBps).toBeNull();
+  });
+
+  it('REJECTs when no momentum baseline tick exists in visible history', () => {
+    // Only ticks AFTER the t-60s cutoff: count >= 2 but no baseline.
+    const sig = generateSignalV022(
+      {
+        state: fixtureState(),
+        recentBtcTicks: [
+          tickAt(-30_000, 67_000),
+          tickAt(-15_000, 67_300),
+          tickAt(0, 67_500),
+        ],
+      },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(sig.decision).toBe('REJECT');
+    expect(sig.features.recentMomentumBps).toBeNull();
+  });
+
+  it('records all v0.2.2 features (pUp/pDown/recentMomentumBps/realizedVolatilityBps/normalizedDistance) on accepted signals', () => {
+    const sig = generateSignalV022(
+      { state: fixtureState(), recentBtcTicks: ticks },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(sig.features.signalEngineVersion).toBe('v0.2.2');
+    expect(typeof sig.features.pUp).toBe('number');
+    expect(typeof sig.features.pDown).toBe('number');
+    expect(typeof sig.features.recentMomentumBps).toBe('number');
+    expect(typeof sig.features.realizedVolatilityBps).toBe('number');
+    expect(typeof sig.features.normalizedDistance).toBe('number');
   });
 });
