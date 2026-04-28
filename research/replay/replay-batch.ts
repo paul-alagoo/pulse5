@@ -47,13 +47,24 @@ import {
 } from '@pulse5/storage';
 import type { BookSnapshot, BtcTick, Market, Signal, SignalRejectionReason } from '@pulse5/models';
 import {
+  DEFAULT_SIGNAL_ENGINE_VERSION,
   DEFAULT_STRATEGY_CONFIG,
   buildMarketState,
   generateSignal,
+  generateSignalV022,
+  isSignalEngineVersion,
   labelSignalOutcome,
   normalizeFinalOutcome,
+  type SignalEngineVersion,
   type StrategyConfig,
 } from '@pulse5/strategy';
+
+/**
+ * Visible-tick window used to feed the v0.2.2 estimator. Same value as
+ * `VOLATILITY_WINDOW_MS` in @pulse5/strategy; duplicated here to avoid
+ * leaking strategy internals through the public API surface.
+ */
+const V022_VISIBLE_TICK_WINDOW_MS = 180_000;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -79,6 +90,12 @@ export interface BatchOptions {
   persist: boolean;
   /** Optional path for the generated JSON signal-density report. */
   reportPath?: string;
+  /**
+   * Which signal-engine version to score with. Default is `v0.2.1`.
+   * v0.2.2 is read-only / dry-run only in v0.2.3 — multi-version
+   * persistence is intentionally NOT wired up here.
+   */
+  signalEngineVersion: SignalEngineVersion;
 }
 
 /**
@@ -124,6 +141,12 @@ export interface SignalDensityReport {
     stepMs: number;
     dryRun: boolean;
     persist: boolean;
+    /**
+     * Which signal-engine version produced this report. Recorded so a
+     * consumer reading the JSON can never misattribute a v0.2.2 result
+     * to v0.2.1 or vice versa. Frozen by design-note §11 / scope §1.
+     */
+    signalEngineVersion: SignalEngineVersion;
   };
   markets: {
     observed: number;
@@ -257,6 +280,7 @@ export function emptyReport(config: BatchOptions, generatedAt: Date): SignalDens
       stepMs: config.stepMs,
       dryRun: config.dryRun,
       persist: config.persist,
+      signalEngineVersion: config.signalEngineVersion,
     },
     markets: {
       observed: 0,
@@ -404,6 +428,8 @@ export interface ParsedCliArgs {
   dryRun: boolean;
   persist: boolean;
   reportPath: string | undefined;
+  /** Engine version chosen by the user (or the v0.2.1 default). */
+  signalEngineVersion: SignalEngineVersion;
 }
 
 /**
@@ -475,7 +501,35 @@ export function parseBatchCliArgs(argv: readonly string[]): ParsedCliArgs {
   const reportRaw = flags.get('report');
   const reportPath = typeof reportRaw === 'string' ? reportRaw : undefined;
 
-  return { from, to, limit, stepMs, dryRun, persist, reportPath };
+  const engineVersionRaw = flags.get('engine-version');
+  const engineVersionProvided = typeof engineVersionRaw === 'string';
+  // Per scope §4: --persist without an explicit --engine-version must
+  // fail fast. v0.2.3 owns the v0.2.2 dry-run replay, not multi-version
+  // persistence; making the user opt in protects v0.2.1's existing
+  // persisted reports.
+  if (persist && !engineVersionProvided) {
+    throw new Error('--persist requires an explicit --engine-version');
+  }
+  let signalEngineVersion: SignalEngineVersion = DEFAULT_SIGNAL_ENGINE_VERSION;
+  if (engineVersionProvided) {
+    if (!isSignalEngineVersion(engineVersionRaw)) {
+      throw new Error(
+        `--engine-version must be one of v0.2.1, v0.2.2; got ${engineVersionRaw}`
+      );
+    }
+    signalEngineVersion = engineVersionRaw;
+  }
+
+  return {
+    from,
+    to,
+    limit,
+    stepMs,
+    dryRun,
+    persist,
+    reportPath,
+    signalEngineVersion,
+  };
 }
 
 /**
@@ -499,6 +553,19 @@ export function validateBatchOptions(options: BatchOptions): void {
   }
   if (options.persist && options.dryRun) {
     throw new Error('persist and dryRun cannot both be true');
+  }
+  if (!isSignalEngineVersion(options.signalEngineVersion)) {
+    throw new Error(
+      `signalEngineVersion must be a known version, got ${options.signalEngineVersion}`
+    );
+  }
+  // v0.2.3 keeps v0.2.2 dry-run only — multi-version persistence is
+  // intentionally NOT in scope (scope §4). Persist is allowed only for
+  // v0.2.1 in v0.2.3.
+  if (options.persist && options.signalEngineVersion !== 'v0.2.1') {
+    throw new Error(
+      'persist is only supported for signalEngineVersion=v0.2.1 in v0.2.3 (multi-version persistence is out of scope)'
+    );
   }
 }
 
@@ -674,6 +741,30 @@ export async function latestTickByReceiveTs(
 }
 
 /**
+ * Visible BTC ticks for `source` whose `receive_ts` falls in
+ * `[windowStart, target]`, ordered ascending. Used to feed the v0.2.2
+ * estimator's momentum / volatility windows. No-lookahead via the
+ * upper bound on `receive_ts`.
+ */
+export async function btcTicksInWindow(
+  db: Db,
+  source: string,
+  windowStart: Date,
+  target: Date
+): Promise<BtcTick[]> {
+  const result = await db.query<TickRow>(
+    `SELECT ts, receive_ts, source, symbol, price, latency_ms, raw_event_id
+       FROM btc_ticks
+      WHERE source = $1
+        AND receive_ts >= $2::timestamptz
+        AND receive_ts <= $3::timestamptz
+      ORDER BY receive_ts ASC`,
+    [source, windowStart, target]
+  );
+  return result.rows.map(rowToTick);
+}
+
+/**
  * Chainlink tick nearest to `startTime` whose `receive_ts <= target` —
  * the no-lookahead price_to_beat fallback. The tolerance window is
  * re-checked here in TS in case the DB returned a row whose ts is far from
@@ -732,7 +823,7 @@ export interface ReplayMarketResult {
 export async function replaySingleMarket(
   deps: ReplayMarketDeps,
   market: Market,
-  options: { stepMs: number; persist: boolean }
+  options: { stepMs: number; persist: boolean; signalEngineVersion: SignalEngineVersion }
 ): Promise<ReplayMarketResult> {
   const config = deps.config ?? DEFAULT_STRATEGY_CONFIG;
   const stamps = samplingTimestamps(market, options.stepMs);
@@ -787,7 +878,23 @@ export async function replaySingleMarket(
     );
     result.statesBuilt += 1;
 
-    let signal = generateSignal(state, config);
+    let signal: Signal;
+    if (options.signalEngineVersion === 'v0.2.2') {
+      // Per design-note §5: features at t come from the same source the
+      // state-builder picked. If no source is set (no fresh tick) we
+      // pass an empty history and the estimator fails closed.
+      const recentBtcTicks: BtcTick[] = state.btcSource
+        ? await btcTicksInWindow(
+            deps.db,
+            state.btcSource,
+            new Date(target.getTime() - V022_VISIBLE_TICK_WINDOW_MS),
+            target
+          )
+        : [];
+      signal = generateSignalV022({ state, recentBtcTicks }, config);
+    } else {
+      signal = generateSignal(state, config);
+    }
 
     // Outcome labeling never reads markets.final_outcome inside the engine
     // — only here, after the signal has already been generated. Resolved
@@ -876,7 +983,11 @@ export async function runBatchReplay(
     const single = await replaySingleMarket(
       { db: deps.db, ...(deps.config ? { config: deps.config } : {}) },
       market,
-      { stepMs: options.stepMs, persist: options.persist }
+      {
+        stepMs: options.stepMs,
+        persist: options.persist,
+        signalEngineVersion: options.signalEngineVersion,
+      }
     );
     report = {
       ...report,
@@ -929,6 +1040,7 @@ async function cliMain(argv: readonly string[]): Promise<void> {
     stepMs: args.stepMs,
     dryRun: args.dryRun,
     persist: args.persist,
+    signalEngineVersion: args.signalEngineVersion,
     ...(args.reportPath ? { reportPath: args.reportPath } : {}),
   };
   const { db } = createDb();

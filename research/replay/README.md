@@ -396,7 +396,8 @@ CLI flags:
 | `--limit=N`  | unlimited   | Max markets to process.                                        |
 | `--step-ms=N`| `5000`      | Replay sampling cadence. Validated to `[100, 300_000]`.        |
 | `--dry-run`  | (default)   | No DB writes. Mutually exclusive with `--persist`.             |
-| `--persist`  | off         | Idempotently write `market_states` + `signals`.                |
+| `--persist`  | off         | Idempotently write `market_states` + `signals`. Requires explicit `--engine-version`. v0.2.3 only allows `--persist` with `--engine-version=v0.2.1`. |
+| `--engine-version=v0.2.1\|v0.2.2` | `v0.2.1` | Which signal-engine version to score with. Recorded in `report.config.signalEngineVersion`. Multi-version persistence is intentionally NOT wired in v0.2.3 — `--persist --engine-version=v0.2.2` is rejected. |
 | `--report=P` | stdout      | Write JSON report to `P` instead of stdout.                    |
 
 ### 9c. Signal-density report shape
@@ -404,7 +405,7 @@ CLI flags:
 ```jsonc
 {
   "generatedAt": "2026-04-27T00:00:00.000Z",
-  "config": { "from": "...", "to": "...", "limit": 200, "stepMs": 5000, "dryRun": true, "persist": false },
+  "config": { "from": "...", "to": "...", "limit": 200, "stepMs": 5000, "dryRun": true, "persist": false, "signalEngineVersion": "v0.2.1" },
   "markets": {
     "observed": 200,
     "replayReady": 187,
