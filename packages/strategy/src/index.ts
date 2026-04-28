@@ -23,13 +23,12 @@ export {
   isSignalEngineVersion,
 } from './signal-engine-version.js';
 
-// v0.2.2 estimator entrypoint is a fail-closed stub. Numerical body,
-// replay calibration, and holdout evaluation are owned by v0.2.3.
-// See research/reports/v0.2.2-estimator-design-note.md.
-export {
-  generateSignalV022,
-  V022_PENDING_ERROR_MESSAGE,
-} from './signal-engine-v022.js';
+// v0.2.2 frozen-design estimator, implemented in v0.2.3. Numeric
+// constants (beta0..beta5, v022MinEstimatedEv, windows, clamps) are in
+// signal-engine-v022-config.ts and are pre-registered.
+// See research/reports/v0.2.2-estimator-design-note.md §12.
+export type { SignalEngineV022Input } from './signal-engine-v022.js';
+export { generateSignalV022 } from './signal-engine-v022.js';
 
 export type { OutcomeLabelInput, OutcomeLabel } from './outcome-labeler.js';
 export { labelSignalOutcome, normalizeFinalOutcome } from './outcome-labeler.js';

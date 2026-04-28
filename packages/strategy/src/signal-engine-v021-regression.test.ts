@@ -2,11 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { MarketState } from '@pulse5/models';
 import { generateSignal } from './signal-engine.js';
 import { DEFAULT_STRATEGY_CONFIG } from './config.js';
-import {
-  DEFAULT_SIGNAL_ENGINE_VERSION,
-  V022_PENDING_ERROR_MESSAGE,
-  generateSignalV022,
-} from './index.js';
+import { DEFAULT_SIGNAL_ENGINE_VERSION } from './index.js';
 
 // v0.2.1 numeric output anchor. v0.2.2 design-freeze adds versioned
 // scaffolding but must not change v0.2.1 outputs even by a hair. If any
@@ -94,12 +90,4 @@ describe('v0.2.1 regression — output is bit-stable under v0.2.2 scaffolding', 
     expect(DEFAULT_SIGNAL_ENGINE_VERSION).toBe('v0.2.1');
   });
 
-  it('the v0.2.2 stub is reachable through the public package surface and fails closed', () => {
-    // Calling the v0.2.2 stub via the package index must throw — proves
-    // the stub is wired through index.ts and that no caller can fall
-    // through to "v0.2.2 behavior" silently.
-    expect(() =>
-      generateSignalV022(fixtureState(), DEFAULT_STRATEGY_CONFIG)
-    ).toThrow(V022_PENDING_ERROR_MESSAGE);
-  });
 });

@@ -10,7 +10,6 @@ import {
   KNOWN_SIGNAL_ENGINE_VERSIONS,
   isSignalEngineVersion,
   generateSignalV022,
-  V022_PENDING_ERROR_MESSAGE,
 } from './index.js';
 
 describe('strategy package public surface', () => {
@@ -35,8 +34,7 @@ describe('strategy package public surface', () => {
     expect(DEFAULT_SIGNAL_ENGINE_VERSION).toBe('v0.2.1');
   });
 
-  it('exposes the v0.2.2 estimator stub as fail-closed (v0.2.3 implementation pending)', () => {
+  it('exposes the frozen v0.2.2 estimator entrypoint via the package index', () => {
     expect(typeof generateSignalV022).toBe('function');
-    expect(V022_PENDING_ERROR_MESSAGE).toMatch(/v0\.2\.3 implementation pending/);
   });
 });
