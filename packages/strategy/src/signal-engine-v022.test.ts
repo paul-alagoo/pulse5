@@ -448,17 +448,54 @@ describe('generateSignalV022 — fail-closed and rejection paths', () => {
     expect(downWide.rejectionReasons).toContain('SPREAD_TOO_WIDE');
   });
 
-  it('REJECTs ENTRY_PRICE_TOO_EXPENSIVE on the selected side', () => {
+  // v0.2.3 review fix: ENTRY_PRICE_TOO_EXPENSIVE is no longer an
+  // independent hard veto in v0.2.2. Final acceptance is governed by
+  // selected-side estimatedEv >= V022_MIN_ESTIMATED_EV. A high entry
+  // price will naturally fail NO_EDGE when EV drops below the gate; it
+  // must NOT appear as ENTRY_PRICE_TOO_EXPENSIVE in v0.2.2.
+  it('does not raise ENTRY_PRICE_TOO_EXPENSIVE in v0.2.2 (EV gate is the sole acceptance test)', () => {
+    // Force both sides expensive enough that selected-side EV drops
+    // below V022_MIN_ESTIMATED_EV. v0.2.2 must reject with NO_EDGE
+    // rather than ENTRY_PRICE_TOO_EXPENSIVE.
     const sig = generateSignalV022(
       {
         state: fixtureState({
           upBestAsk: DEFAULT_STRATEGY_CONFIG.maxEntryPrice + 0.01,
+          downBestAsk: DEFAULT_STRATEGY_CONFIG.maxEntryPrice + 0.01,
         }),
         recentBtcTicks: ticks,
       },
       DEFAULT_STRATEGY_CONFIG
     );
-    expect(sig.rejectionReasons).toContain('ENTRY_PRICE_TOO_EXPENSIVE');
+    expect(sig.rejectionReasons).not.toContain('ENTRY_PRICE_TOO_EXPENSIVE');
+  });
+
+  it('accepts a signal with entryPrice > maxEntryPrice when EV still clears the v0.2.2 gate', () => {
+    // Saturating-up: pUp = P_UP_CLAMP_HI = 0.98. With upBestAsk = 0.80
+    // (above DEFAULT maxEntryPrice = 0.75), upEv = 0.98 - 0.80 = 0.18,
+    // well above V022_MIN_ESTIMATED_EV = 0.02. v0.2.1 would have
+    // rejected on ENTRY_PRICE_TOO_EXPENSIVE; v0.2.2 must accept.
+    const upState = fixtureState({
+      btcPrice: 73_700,
+      distance: 6_700,
+      distanceBps: (6_700 / 67_000) * 10_000,
+      upBestAsk: 0.80,
+      upBestBid: 0.78,
+      upSpread: 0.02,
+      // Make down side ineligible so the EV pick is unambiguous.
+      downBestAsk: 0.99,
+      downBestBid: 0.97,
+      downSpread: 0.02,
+    });
+    const upTicks = tickHistory(67_000, 73_700);
+    const sig = generateSignalV022(
+      { state: upState, recentBtcTicks: upTicks },
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(sig.rejectionReasons).not.toContain('ENTRY_PRICE_TOO_EXPENSIVE');
+    expect(sig.decision).toBe('BUY_UP');
+    expect(sig.side).toBe('UP');
+    expect(sig.price).toBe(0.80);
   });
 
   it('REJECTs NO_EDGE when selected EV is below v0.2.2 minEstimatedEv', () => {

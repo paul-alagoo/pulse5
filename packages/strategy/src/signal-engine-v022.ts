@@ -393,9 +393,10 @@ function decide(
     selectedEv = downEv;
   }
 
-  // Apply spread / entry-price gates on the selected side only — single
-  // veto each, mapped to existing reason codes so the rejection-reason
-  // histogram remains comparable to v0.2.1.
+  // Apply the spread gate on the selected side only — kept as a
+  // data-quality-ish gate per design-note §6 motivation, mapped to the
+  // existing reason code so the rejection-reason histogram remains
+  // comparable to v0.2.1.
   if (side === 'UP') {
     if (state.upSpread !== null && state.upSpread > config.maxSpread) {
       reasons.add('SPREAD_TOO_WIDE');
@@ -405,14 +406,14 @@ function decide(
       reasons.add('SPREAD_TOO_WIDE');
     }
   }
-  if (entryPrice !== null && entryPrice > config.maxEntryPrice) {
-    reasons.add('ENTRY_PRICE_TOO_EXPENSIVE');
-  }
 
-  // EV gate: v0.2.2 minEstimatedEv (NOT v0.2.1's). The
-  // BTC_TOO_CLOSE_TO_PRICE_TO_BEAT gate is dropped per
-  // redesign-issue-spec §"2. Gate Structure Redesign" — distance is now
-  // a feature, not an independent veto.
+  // EV gate: v0.2.2 minEstimatedEv (NOT v0.2.1's). Per scope.zh.md and
+  // redesign-issue-spec §"2. Gate Structure Redesign", v0.2.2 has NO
+  // independent hard veto for entry price, distance, or estimated
+  // probability — final acceptance is governed solely by the
+  // selected-side EV. A high entryPrice naturally fails this gate when
+  // EV drops below threshold; ENTRY_PRICE_TOO_EXPENSIVE is intentionally
+  // not raised in v0.2.2.
   if (selectedEv === null || selectedEv < V022_MIN_ESTIMATED_EV) {
     reasons.add('NO_EDGE');
   }

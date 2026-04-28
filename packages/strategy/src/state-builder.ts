@@ -57,18 +57,49 @@ export function buildMarketState(
   const { market, upBook, downBook, chainlinkTick, binanceTick, targetTimestamp } = input;
 
   // BTC price: prefer Chainlink (the resolution feed), fall back to Binance.
+  // Frozen design (v0.2.2-estimator-design-note §5): the Binance fallback
+  // is used when the most recent Chainlink tick is missing OR stale per
+  // `maxBtcTickAgeMs`. A stale Chainlink tick must NOT be selected when a
+  // fresh Binance tick is available, otherwise the stale price would leak
+  // into the estimator's features.
+  const chainlinkUsable =
+    chainlinkTick !== null && Number.isFinite(chainlinkTick.price);
+  const chainlinkAgeMs = chainlinkUsable
+    ? ageMs(chainlinkTick.receiveTs, targetTimestamp)
+    : null;
+  const chainlinkFresh =
+    chainlinkUsable && chainlinkAgeMs !== null && chainlinkAgeMs <= config.maxBtcTickAgeMs;
+  const binanceUsable =
+    binanceTick !== null && Number.isFinite(binanceTick.price);
+  const binanceAgeMs = binanceUsable
+    ? ageMs(binanceTick.receiveTs, targetTimestamp)
+    : null;
+  const binanceFresh =
+    binanceUsable && binanceAgeMs !== null && binanceAgeMs <= config.maxBtcTickAgeMs;
+
   let btcPrice: number | null = null;
   let btcSource: MarketState['btcSource'] = null;
   let btcTickAgeMs: number | null = null;
 
-  if (chainlinkTick && Number.isFinite(chainlinkTick.price)) {
+  if (chainlinkFresh) {
     btcPrice = chainlinkTick.price;
     btcSource = chainlinkTick.source;
-    btcTickAgeMs = ageMs(chainlinkTick.receiveTs, targetTimestamp);
-  } else if (binanceTick && Number.isFinite(binanceTick.price)) {
+    btcTickAgeMs = chainlinkAgeMs;
+  } else if (binanceFresh) {
     btcPrice = binanceTick.price;
     btcSource = binanceTick.source;
-    btcTickAgeMs = ageMs(binanceTick.receiveTs, targetTimestamp);
+    btcTickAgeMs = binanceAgeMs;
+  } else if (chainlinkUsable) {
+    // Both feeds are missing-or-stale and Chainlink is at least present —
+    // surface its (stale) value so downstream `stale=true` plus
+    // `STALE_BTC_TICK` rejection still fire deterministically.
+    btcPrice = chainlinkTick.price;
+    btcSource = chainlinkTick.source;
+    btcTickAgeMs = chainlinkAgeMs;
+  } else if (binanceUsable) {
+    btcPrice = binanceTick.price;
+    btcSource = binanceTick.source;
+    btcTickAgeMs = binanceAgeMs;
   }
 
   // priceToBeat: prefer market.priceToBeat; otherwise the Chainlink-tick

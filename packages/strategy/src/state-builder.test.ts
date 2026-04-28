@@ -172,6 +172,65 @@ describe('buildMarketState — fallback BTC source', () => {
     expect(state.btcSource).toBe('rtds.binance');
     expect(state.chainlinkBinanceGapBps).toBeNull();
   });
+
+  // Frozen design (v0.2.2-estimator-design-note §5): Binance is the
+  // fallback whenever the Chainlink tick is missing OR stale (age >
+  // maxBtcTickAgeMs). The previous implementation only fell back when
+  // Chainlink was missing entirely — a stale Chainlink tick would still
+  // be selected as `btcSource`, leaking the stale price into the
+  // estimator. Test with a fresh Binance tick available.
+  it('falls back to Binance when Chainlink tick is stale and Binance is fresh', () => {
+    const staleChainlink = fixtureTick({
+      receiveTs: new Date(TARGET.getTime() - DEFAULT_STRATEGY_CONFIG.maxBtcTickAgeMs - 1),
+      price: 67_400,
+    });
+    const freshBinance = fixtureTick({
+      source: 'rtds.binance',
+      symbol: 'btcusdt',
+      receiveTs: new Date(TARGET.getTime() - 200),
+      price: 67_510,
+    });
+    const state = buildMarketState(
+      makeInput({ chainlinkTick: staleChainlink, binanceTick: freshBinance }),
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(state.btcSource).toBe('rtds.binance');
+    expect(state.btcPrice).toBe(67_510);
+    expect(state.btcTickAgeMs).toBe(200);
+  });
+
+  it('keeps stale Chainlink when Binance tick is missing (fail-closed via stale flag)', () => {
+    const staleChainlink = fixtureTick({
+      receiveTs: new Date(TARGET.getTime() - DEFAULT_STRATEGY_CONFIG.maxBtcTickAgeMs - 1),
+      price: 67_400,
+    });
+    const state = buildMarketState(
+      makeInput({ chainlinkTick: staleChainlink, binanceTick: null }),
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(state.btcSource).toBe('rtds.chainlink');
+    expect(state.btcPrice).toBe(67_400);
+    expect(state.stale).toBe(true);
+  });
+
+  it('keeps stale Chainlink when Binance is also stale (no fresh fallback available)', () => {
+    const staleChainlink = fixtureTick({
+      receiveTs: new Date(TARGET.getTime() - DEFAULT_STRATEGY_CONFIG.maxBtcTickAgeMs - 1),
+      price: 67_400,
+    });
+    const staleBinance = fixtureTick({
+      source: 'rtds.binance',
+      symbol: 'btcusdt',
+      receiveTs: new Date(TARGET.getTime() - DEFAULT_STRATEGY_CONFIG.maxBtcTickAgeMs - 50),
+      price: 67_510,
+    });
+    const state = buildMarketState(
+      makeInput({ chainlinkTick: staleChainlink, binanceTick: staleBinance }),
+      DEFAULT_STRATEGY_CONFIG
+    );
+    expect(state.btcSource).toBe('rtds.chainlink');
+    expect(state.stale).toBe(true);
+  });
 });
 
 describe('buildMarketState — replay safety', () => {
@@ -260,12 +319,19 @@ describe('buildMarketState — null / partial book inputs', () => {
 });
 
 describe('buildMarketState — staleness', () => {
-  it('flags stale=true when btc tick age exceeds maxBtcTickAgeMs', () => {
-    const tick = fixtureTick({
-      receiveTs: new Date(TARGET.getTime() - DEFAULT_STRATEGY_CONFIG.maxBtcTickAgeMs - 1),
+  it('flags stale=true when btc tick age exceeds maxBtcTickAgeMs (no fresh fallback)', () => {
+    // Both feeds stale: the design fallback only kicks in when Binance is
+    // *fresh*, so when both are stale the state remains stale.
+    const stale = (offset: number): Date =>
+      new Date(TARGET.getTime() - DEFAULT_STRATEGY_CONFIG.maxBtcTickAgeMs - offset);
+    const chainlinkTick = fixtureTick({ receiveTs: stale(1) });
+    const binanceTick = fixtureTick({
+      source: 'rtds.binance',
+      symbol: 'btcusdt',
+      receiveTs: stale(50),
     });
     const state = buildMarketState(
-      makeInput({ chainlinkTick: tick }),
+      makeInput({ chainlinkTick, binanceTick }),
       DEFAULT_STRATEGY_CONFIG
     );
     expect(state.stale).toBe(true);
