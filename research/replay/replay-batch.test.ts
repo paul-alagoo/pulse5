@@ -207,6 +207,7 @@ describe('foldSignalIntoReport', () => {
         stepMs: 5000,
         dryRun: true,
         persist: false,
+        signalEngineVersion: 'v0.2.1',
       },
       FIXED_START
     );
@@ -266,6 +267,7 @@ describe('foldSignalIntoReport', () => {
         stepMs: 5000,
         dryRun: true,
         persist: false,
+        signalEngineVersion: 'v0.2.1',
       },
       FIXED_START
     );
@@ -311,6 +313,7 @@ describe('notesForReport', () => {
         stepMs: 5000,
         dryRun: true,
         persist: false,
+        signalEngineVersion: 'v0.2.1',
       },
       FIXED_START
     );
@@ -333,6 +336,7 @@ describe('notesForReport', () => {
         stepMs: 5000,
         dryRun: true,
         persist: false,
+        signalEngineVersion: 'v0.2.1',
       },
       FIXED_START
     );
@@ -373,6 +377,7 @@ describe('notesForReport', () => {
         stepMs: 5000,
         dryRun: true,
         persist: false,
+        signalEngineVersion: 'v0.2.1',
       },
       FIXED_START
     );
@@ -410,6 +415,7 @@ describe('notesForReport', () => {
         stepMs: 5000,
         dryRun: true,
         persist: false,
+        signalEngineVersion: 'v0.2.1',
       },
       FIXED_START
     );
@@ -466,6 +472,7 @@ describe('parseBatchCliArgs', () => {
       '--from=2026-04-20T00:00:00Z',
       '--to=2026-04-27T00:00:00Z',
       '--persist',
+      '--engine-version=v0.2.1',
     ]);
     expect(args.dryRun).toBe(false);
     expect(args.persist).toBe(true);
@@ -579,6 +586,7 @@ describe('validateBatchOptions', () => {
       stepMs: 5000,
       dryRun: true,
       persist: false,
+      signalEngineVersion: 'v0.2.1',
       ...overrides,
     };
   }
@@ -805,6 +813,7 @@ describe('runBatchReplay (end-to-end)', () => {
       stepMs: 60_000, // 4 samples in a 5-min market
       dryRun: true,
       persist: false,
+      signalEngineVersion: 'v0.2.1',
     };
     const r1 = await runBatchReplay({ db: db1, now: () => FIXED_START }, opts);
     const db2 = happyPathDb();
@@ -854,6 +863,7 @@ describe('runBatchReplay (end-to-end)', () => {
         stepMs: 60_000,
         dryRun: true,
         persist: false,
+        signalEngineVersion: 'v0.2.1',
       }
     );
     expect(r.markets.observed).toBe(1);
@@ -920,6 +930,7 @@ describe('runBatchReplay (end-to-end)', () => {
       stepMs: 60_000, // 4 samples
       dryRun: false,
       persist: true,
+      signalEngineVersion: 'v0.2.1',
     };
     const r1 = await runBatchReplay({ db, now: () => FIXED_START }, opts);
     expect(r1.states.persistedNew).toBe(4);
@@ -992,6 +1003,7 @@ describe('runBatchReplay (end-to-end)', () => {
         stepMs: 60_000,
         dryRun: true,
         persist: false,
+        signalEngineVersion: 'v0.2.1',
       }
     );
     expect(r.states.built).toBe(r.signals.total);
@@ -1008,6 +1020,7 @@ describe('runBatchReplay (end-to-end)', () => {
         stepMs: 60_000,
         dryRun: true,
         persist: false,
+        signalEngineVersion: 'v0.2.1',
       }
     );
     expect(r.notes.length).toBeGreaterThan(0);
@@ -1025,6 +1038,7 @@ describe('SignalDensityReport shape', () => {
         stepMs: 5000,
         dryRun: true,
         persist: false,
+        signalEngineVersion: 'v0.2.1',
       },
       FIXED_START
     );
@@ -1032,5 +1046,209 @@ describe('SignalDensityReport shape', () => {
     expect(r.signals.acceptedRate).toBe(0);
     expect(r.markets.observed).toBe(0);
     expect(r.config.persist).toBe(false);
+  });
+
+  it('records signalEngineVersion in config', () => {
+    const r: SignalDensityReport = emptyReport(
+      {
+        from: FIXED_START,
+        to: FIXED_END,
+        limit: null,
+        stepMs: 5000,
+        dryRun: true,
+        persist: false,
+        signalEngineVersion: 'v0.2.2',
+      },
+      FIXED_START
+    );
+    expect(r.config.signalEngineVersion).toBe('v0.2.2');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v0.2.3 engine-version selection
+
+describe('parseBatchCliArgs (engine-version)', () => {
+  it('defaults to v0.2.1 when --engine-version is omitted', () => {
+    const args = parseBatchCliArgs([
+      '--from=2026-04-20T00:00:00Z',
+      '--to=2026-04-27T00:00:00Z',
+    ]);
+    expect(args.signalEngineVersion).toBe('v0.2.1');
+  });
+
+  it('parses --engine-version=v0.2.2', () => {
+    const args = parseBatchCliArgs([
+      '--from=2026-04-20T00:00:00Z',
+      '--to=2026-04-27T00:00:00Z',
+      '--engine-version=v0.2.2',
+    ]);
+    expect(args.signalEngineVersion).toBe('v0.2.2');
+  });
+
+  it('rejects unknown --engine-version values', () => {
+    expect(() =>
+      parseBatchCliArgs([
+        '--from=2026-04-20T00:00:00Z',
+        '--to=2026-04-27T00:00:00Z',
+        '--engine-version=v0.2.99',
+      ])
+    ).toThrow(/engine-version/);
+  });
+
+  it('--persist without --engine-version is rejected (fail-fast)', () => {
+    expect(() =>
+      parseBatchCliArgs([
+        '--from=2026-04-20T00:00:00Z',
+        '--to=2026-04-27T00:00:00Z',
+        '--persist',
+      ])
+    ).toThrow(/--persist requires an explicit --engine-version/);
+  });
+
+  it('--persist with --engine-version=v0.2.1 is accepted', () => {
+    const args = parseBatchCliArgs([
+      '--from=2026-04-20T00:00:00Z',
+      '--to=2026-04-27T00:00:00Z',
+      '--persist',
+      '--engine-version=v0.2.1',
+    ]);
+    expect(args.persist).toBe(true);
+    expect(args.signalEngineVersion).toBe('v0.2.1');
+  });
+});
+
+describe('validateBatchOptions (engine-version)', () => {
+  it('rejects persist=true with v0.2.2 (multi-version persistence is out of scope)', () => {
+    expect(() =>
+      validateBatchOptions({
+        from: FIXED_START,
+        to: FIXED_END,
+        limit: null,
+        stepMs: 5000,
+        dryRun: false,
+        persist: true,
+        signalEngineVersion: 'v0.2.2',
+      })
+    ).toThrow(/persist is only supported for signalEngineVersion=v0.2.1/);
+  });
+
+  it('rejects unknown signalEngineVersion strings', () => {
+    expect(() =>
+      validateBatchOptions({
+        from: FIXED_START,
+        to: FIXED_END,
+        limit: null,
+        stepMs: 5000,
+        dryRun: true,
+        persist: false,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        signalEngineVersion: 'junk' as any,
+      })
+    ).toThrow(/signalEngineVersion/);
+  });
+});
+
+describe('runBatchReplay (engine-version dispatch)', () => {
+  it('routes v0.2.2 through the frozen estimator and queries the BTC tick window', async () => {
+    // Scripted DB: one resolved market, one book per token, AND a
+    // multi-tick window query for v0.2.2's volatility / momentum
+    // history. The "FROM btc_ticks ... WHERE source = $1" SELECT (no
+    // window bounds) returns the latest tick used by the state-builder.
+    // The "FROM btc_ticks ... receive_ts >= $2 AND receive_ts <= $3"
+    // SELECT returns the historical window for the v0.2.2 estimator.
+    const marketRow: QueryResultRow = {
+      market_id: 'mkt-1',
+      event_id: 'evt-1',
+      slug: 'btc-updown-5m-1',
+      question: 'q',
+      condition_id: 'cond-1',
+      up_token_id: 'tok-up',
+      down_token_id: 'tok-down',
+      start_time: FIXED_START,
+      end_time: FIXED_END,
+      price_to_beat: '67250',
+      resolution_source: 'chainlink-btc-usd',
+      status: 'resolved',
+      final_outcome: 'Up',
+    };
+    const bookRow: QueryResultRow = {
+      ts: FIXED_START,
+      receive_ts: FIXED_START,
+      market_id: 'mkt-1',
+      token_id: 'tok-up',
+      best_bid: '0.50',
+      best_ask: '0.55',
+      bid_size: '100',
+      ask_size: '100',
+      spread: '0.05',
+      raw_event_id: '1',
+    };
+    const tickRow = (offsetMs: number, price: string): QueryResultRow => ({
+      ts: new Date(FIXED_START.getTime() + offsetMs),
+      receive_ts: new Date(FIXED_START.getTime() + offsetMs),
+      source: 'rtds.chainlink',
+      symbol: 'btc/usd',
+      price,
+      latency_ms: 5,
+      raw_event_id: '2',
+    });
+    const db = fakeDb([
+      { match: /FROM markets/, rows: [marketRow] },
+      { match: /FROM book_snapshots/, rows: [bookRow] },
+      // The v0.2.2 estimator's window query has both bounds; this entry
+      // is checked first (fakeDb matches in order) so it wins over the
+      // single-bound latest-tick entry below.
+      {
+        match: /receive_ts >= \$2/,
+        rows: [
+          tickRow(-180_000, '67400'),
+          tickRow(-120_000, '67450'),
+          tickRow(-60_000, '67500'),
+          tickRow(0, '67500'),
+        ],
+      },
+      // The state-builder's "latest tick" query has receive_ts <= $2 only.
+      {
+        match: /FROM btc_ticks/,
+        rows: [tickRow(0, '67500')],
+      },
+    ]);
+    const r = await runBatchReplay(
+      { db, now: () => FIXED_START },
+      {
+        from: FIXED_START,
+        to: FIXED_END,
+        limit: null,
+        stepMs: 60_000,
+        dryRun: true,
+        persist: false,
+        signalEngineVersion: 'v0.2.2',
+      }
+    );
+    expect(r.config.signalEngineVersion).toBe('v0.2.2');
+    // The window query was issued at least once (one per sample step).
+    const windowQueries = db.calls.filter((c) => /receive_ts >= \$2/.test(c.text));
+    expect(windowQueries.length).toBeGreaterThan(0);
+    // No INSERTs ever — v0.2.2 is dry-run only.
+    expect(db.calls.some((c) => /INSERT INTO/.test(c.text))).toBe(false);
+  });
+
+  it('does NOT issue the v0.2.2 window query under v0.2.1 (default path stays unchanged)', async () => {
+    const db = happyPathDb();
+    await runBatchReplay(
+      { db, now: () => FIXED_START },
+      {
+        from: FIXED_START,
+        to: FIXED_END,
+        limit: null,
+        stepMs: 60_000,
+        dryRun: true,
+        persist: false,
+        signalEngineVersion: 'v0.2.1',
+      }
+    );
+    const windowQueries = db.calls.filter((c) => /receive_ts >= \$2/.test(c.text));
+    expect(windowQueries).toHaveLength(0);
   });
 });
